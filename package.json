@@ -1,0 +1,6 @@
+{
+  "name": "quicknews-api",
+  "version": "1.0.0",
+  "description": "速懶報 Quicknews API Backend",
+  "private": true
+}
