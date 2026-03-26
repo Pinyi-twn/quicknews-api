@@ -4,7 +4,7 @@ const NOTION_VERSION = '2022-06-28';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'public, max-age=300'); // 瀏覽器快取 5 分鐘
+  res.setHeader('Cache-Control', 'public, max-age=300');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const notionKey = process.env.NOTION_API_KEY;
@@ -15,7 +15,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 讀 Notion：只取 Active=true 的，按建立時間排序
     const r = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
       method: 'POST',
       headers: {
@@ -36,23 +35,27 @@ export default async function handler(req, res) {
     const items = (data.results || []).map(page => {
       const p = page.properties;
       return {
-        title: p.Title?.title?.[0]?.text?.content || '',
-        body:  p.Body?.rich_text?.[0]?.text?.content || '',
-        ai:    p.AI?.rich_text?.[0]?.text?.content || '',
-        tag:   p.Tag?.select?.name || '財經',
-        tc:    p.TC?.rich_text?.[0]?.text?.content || 'b-macro',
-        url:   p.URL?.url || '',
-        t:     p.Time?.rich_text?.[0]?.text?.content || '',
+        title:     p.Title?.title?.[0]?.text?.content || '',
+        body:      p.Body?.rich_text?.[0]?.text?.content || '',
+        ai:        p.AI?.rich_text?.[0]?.text?.content || '',
+        tag:       p.Tag?.select?.name || '財經',
+        tc:        p.TC?.rich_text?.[0]?.text?.content || 'b-macro',
+        url:       p.URL?.url || '',
+        t:         p.Time?.rich_text?.[0]?.text?.content || '',
+        updatedAt: p.UpdatedAt?.rich_text?.[0]?.text?.content || '',
       };
     }).filter(n => n.title.length > 2);
+
+    // 依 UpdatedAt 降冪排序（yyyy.mm.dd HH:MM 格式可直接字串比對）
+    items.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
 
     return res.status(200).json({
       items,
       count: items.length,
       source: 'notion',
-      updatedAt: new Date().toISOString(),
+      updatedAt: items[0]?.updatedAt || new Date().toISOString(),
     });
-  } catch(e) {
+  } catch (e) {
     console.error('News error:', e.message);
     return res.status(500).json({ error: e.message, items: [] });
   }
