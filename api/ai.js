@@ -8,12 +8,23 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.error('ANTHROPIC_API_KEY is not set');
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured', aiTexts: [] });
+  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set', aiTexts: [] });
+
+  // Vercel 不自動解析 body，需手動處理
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch(e) { body = {}; }
+  }
+  if (!body || typeof body !== 'object') {
+    // 嘗試從 stream 讀取
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      body = JSON.parse(Buffer.concat(chunks).toString());
+    } catch(e) { body = {}; }
   }
 
-  const { headlines, count } = req.body || {};
+  const { headlines, count } = body;
   if (!headlines) return res.status(400).json({ error: 'headlines required', aiTexts: [] });
 
   try {
@@ -34,7 +45,7 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error('Claude API error:', response.status, errText);
+      console.error('Claude error:', response.status, errText.slice(0,200));
       return res.status(500).json({ error: `Claude ${response.status}`, aiTexts: [] });
     }
 
@@ -43,7 +54,7 @@ export default async function handler(req, res) {
     const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
     return res.status(200).json({ aiTexts: parsed.map(i => i.ai || ''), count: parsed.length });
   } catch(e) {
-    console.error('AI handler error:', e.message);
+    console.error('AI error:', e.message);
     return res.status(500).json({ error: e.message, aiTexts: [] });
   }
 }
