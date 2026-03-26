@@ -1,79 +1,59 @@
-// api/news.js — 新聞 proxy（Vercel server 端，無 CORS 限制）
+// api/news.js — 從 Notion 讀取新聞（含用戶手動編輯）
+const NOTION_API = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2022-06-28';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('Cache-Control', 'public, max-age=300'); // 瀏覽器快取 5 分鐘
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const RSS_URL = 'https://news.google.com/rss/search?q=%E5%8F%B0%E7%A9%8D%E9%9B%BB+OR+%E5%8F%B0%E8%82%A1+OR+%E8%81%AF%E7%99%BC%E7%A7%91+OR+%E7%BE%8E%E8%82%A1+OR+Fed&hl=zh-TW&gl=TW&ceid=TW:zh-Hant';
+  const notionKey = process.env.NOTION_API_KEY;
+  const dbId      = process.env.NOTION_DB_ID;
 
-  // 清除所有 HTML 標籤和 entities
-  function cleanHtml(str) {
-    return (str || '')
-      .replace(/<!\[CDATA\[(.*?)\]\]>/gs, '$1')
-      .replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, '')  // 移除 <a> 連結及內容
-      .replace(/<[^>]*>/g, '')
-      .replace(/&lt;.*?&gt;/g, '')                  // 移除 &lt;a href...&gt;
-      .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&')
-      .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ')
-      .replace(/\s+/g,' ').trim();
-  }
-
-  function tagNews(title) {
-    if (/台積電|半導體|晶片|CoWoS|輝達|NVDA|AI伺服器/i.test(title)) return {tag:'半導體', tc:'b-semi'};
-    if (/Fed|聯準會|利率|通膨|降息|升息|美元/i.test(title))           return {tag:'總經',   tc:'b-macro'};
-    if (/法說|財報|EPS|獲利|營收/i.test(title))                        return {tag:'財報',   tc:'b-report'};
-    if (/美股|S&P|那斯達克|TSLA|AAPL|Meta|Google/i.test(title))       return {tag:'美股',   tc:'b-us'};
-    return {tag:'財經', tc:'b-macro'};
+  if (!notionKey || !dbId) {
+    return res.status(500).json({ error: 'Notion not configured', items: [] });
   }
 
   try {
-    const r = await fetch(RSS_URL, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' }
+    // 讀 Notion：只取 Active=true 的，按建立時間排序
+    const r = await fetch(`${NOTION_API}/databases/${dbId}/query`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${notionKey}`,
+        'Notion-Version': NOTION_VERSION,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        filter: { property: 'Active', checkbox: { equals: true } },
+        sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+        page_size: 8
+      })
     });
-    if (!r.ok) throw new Error(`RSS ${r.status}`);
-    const xml = await r.text();
 
-    const items = [];
-    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-    let m;
-    while ((m = itemRegex.exec(xml)) !== null && items.length < 8) {
-      const block = m[1];
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.message || 'Notion query failed');
 
-      // 標題：去掉 " - 來源" 後綴
-      const rawTitle = cleanHtml(
-        (block.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/s) ||
-         block.match(/<title>(.*?)<\/title>/s))?.[1] || ''
-      );
-      const title = rawTitle.replace(/ - [^-]+$/, '').trim();
-      if (!title || title.length < 4) continue;
-
-      // 內文：取 description 但去掉所有 HTML
-      const rawDesc = cleanHtml(
-        (block.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/) ||
-         block.match(/<description>([\s\S]*?)<\/description>/))?.[1] || ''
-      );
-      const body = rawDesc.slice(0, 120) + (rawDesc.length > 120 ? '…' : '');
-
-      // 連結
-      const link = (block.match(/<link>(.*?)<\/link>/))?.[1]?.trim() || '';
-
-      // 時間
-      const pubDate = (block.match(/<pubDate>(.*?)<\/pubDate>/))?.[1]?.trim() || '';
-      const pub = pubDate ? new Date(pubDate) : new Date();
-      const t = isNaN(pub.getTime()) ? '' :
-        `${String(pub.getHours()).padStart(2,'0')}:${String(pub.getMinutes()).padStart(2,'0')}`;
-
-      const {tag, tc} = tagNews(title);
-      items.push({ tag, tc, title, body, url: link, t, pubDate, ai: '' });
-    }
+    const items = (data.results || []).map(page => {
+      const p = page.properties;
+      return {
+        title: p.Title?.title?.[0]?.text?.content || '',
+        body:  p.Body?.rich_text?.[0]?.text?.content || '',
+        ai:    p.AI?.rich_text?.[0]?.text?.content || '',
+        tag:   p.Tag?.select?.name || '財經',
+        tc:    p.TC?.rich_text?.[0]?.text?.content || 'b-macro',
+        url:   p.URL?.url || '',
+        t:     p.Time?.rich_text?.[0]?.text?.content || '',
+      };
+    }).filter(n => n.title.length > 2);
 
     return res.status(200).json({
       items,
-      updatedAt: new Date().toISOString(),
       count: items.length,
+      source: 'notion',
+      updatedAt: new Date().toISOString(),
     });
   } catch(e) {
+    console.error('News error:', e.message);
     return res.status(500).json({ error: e.message, items: [] });
   }
 }
