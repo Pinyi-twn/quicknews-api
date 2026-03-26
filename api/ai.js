@@ -1,4 +1,8 @@
-// api/ai.js — Claude AI 新聞解析
+// api/ai.js
+export const config = {
+  api: { bodyParser: { sizeLimit: '1mb' } }
+};
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -10,10 +14,8 @@ export default async function handler(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ error: 'API key missing', aiTexts: [] });
 
-  // Vercel 自動解析 JSON body
   const headlines = req.body?.headlines;
   const count = req.body?.count || 5;
-
   if (!headlines) return res.status(400).json({ error: 'headlines required', aiTexts: [] });
 
   try {
@@ -27,16 +29,15 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 600,
-        system: '你是速懶報 AI 分析師。對每則新聞用繁體中文提供一句30字以內投資解讀。只回覆JSON陣列格式：[{"ai":"解讀"}]，不含其他文字。',
+        system: '你是速懶報 AI 分析師。對每則新聞用繁體中文提供一句30字以內投資解讀。只回覆JSON陣列：[{"ai":"解讀"}]，不含其他文字。',
         messages: [{ role: 'user', content: `請對以下${count}則新聞提供AI解讀：\n${headlines}` }]
       })
     });
 
     const data = await r.json();
-
     if (!r.ok) {
-      console.error('Claude error:', r.status, JSON.stringify(data).slice(0,200));
-      return res.status(500).json({ error: `Claude ${r.status}: ${data.error?.message || ''}`, aiTexts: [] });
+      console.error('Claude error:', r.status, data?.error?.message);
+      return res.status(500).json({ error: `Claude ${r.status}`, detail: data?.error?.message, aiTexts: [] });
     }
 
     const text = data.content?.[0]?.text || '[]';
