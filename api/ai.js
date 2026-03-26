@@ -8,27 +8,16 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not set', aiTexts: [] });
+  if (!apiKey) return res.status(500).json({ error: 'API key missing', aiTexts: [] });
 
-  // Vercel 不自動解析 body，需手動處理
-  let body = req.body;
-  if (typeof body === 'string') {
-    try { body = JSON.parse(body); } catch(e) { body = {}; }
-  }
-  if (!body || typeof body !== 'object') {
-    // 嘗試從 stream 讀取
-    try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      body = JSON.parse(Buffer.concat(chunks).toString());
-    } catch(e) { body = {}; }
-  }
+  // Vercel 自動解析 JSON body
+  const headlines = req.body?.headlines;
+  const count = req.body?.count || 5;
 
-  const { headlines, count } = body;
   if (!headlines) return res.status(400).json({ error: 'headlines required', aiTexts: [] });
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -38,23 +27,23 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 600,
-        system: '你是速懶報 Quicknews 的 AI 財經分析師。請用繁體中文，對每則新聞提供一句 30 字以內的投資解讀。只回覆 JSON 陣列，格式：[{"ai":"解讀文字"}]，不要其他文字或 markdown。',
-        messages: [{ role: 'user', content: `請對以下 ${count || 5} 則新聞各提供一句 AI 解讀：\n${headlines}` }]
+        system: '你是速懶報 AI 分析師。對每則新聞用繁體中文提供一句30字以內投資解讀。只回覆JSON陣列格式：[{"ai":"解讀"}]，不含其他文字。',
+        messages: [{ role: 'user', content: `請對以下${count}則新聞提供AI解讀：\n${headlines}` }]
       })
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('Claude error:', response.status, errText.slice(0,200));
-      return res.status(500).json({ error: `Claude ${response.status}`, aiTexts: [] });
+    const data = await r.json();
+
+    if (!r.ok) {
+      console.error('Claude error:', r.status, JSON.stringify(data).slice(0,200));
+      return res.status(500).json({ error: `Claude ${r.status}: ${data.error?.message || ''}`, aiTexts: [] });
     }
 
-    const data = await response.json();
     const text = data.content?.[0]?.text || '[]';
-    const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
     return res.status(200).json({ aiTexts: parsed.map(i => i.ai || ''), count: parsed.length });
-  } catch(e) {
-    console.error('AI error:', e.message);
+  } catch (e) {
+    console.error('Error:', e.message);
     return res.status(500).json({ error: e.message, aiTexts: [] });
   }
 }
