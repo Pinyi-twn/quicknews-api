@@ -118,7 +118,8 @@ export default async function handler(req, res) {
         pinned:    p.Pinned?.checkbox || false,
       };
       items.push(item);
-      if (item.type) {
+      // 結果已按 last_edited_time 降冪排序，只保留最新一筆（first-seen-wins）
+      if (item.type && !analyses[item.type]) {
         analyses[item.type] = {
           title: item.title,
           content: item.content,
