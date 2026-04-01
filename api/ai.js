@@ -20,6 +20,7 @@ export default async function handler(req, res) {
 
       // 模式一：聊天
       if (mode === 'chat' && messages) {
+        // 組合即時市場背景（由前端傳入）
         const ctx = req.body?.marketContext;
         const ctxStr = ctx ? `\n\n【當前市場快照】\n${Object.entries(ctx).map(([k,v])=>`${k}: ${v}`).join('\n')}` : '';
         const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -32,7 +33,6 @@ export default async function handler(req, res) {
           body: JSON.stringify({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 600,
-            system: '你是速懶報 Quicknews AI 助理 🦥⚡，專精台股與美股分析。用繁體中文簡潔回答，100字以內。善用 emoji。',
             system: `你是速懶報 Quicknews AI 助理 🦥⚡，專精台股與美股分析。用繁體中文簡潔回答，100字以內。善用 emoji。回答時請參考以下即時市場數據。${ctxStr}`,
             messages: messages.slice(-10),
           })
@@ -121,7 +121,6 @@ export default async function handler(req, res) {
         pinned:    p.Pinned?.checkbox || false,
       };
       items.push(item);
-      // 結果已按 last_edited_time 降冪排序，只保留最新一筆（first-seen-wins）
       if (item.type && !analyses[item.type]) {
         analyses[item.type] = {
           title: item.title,
