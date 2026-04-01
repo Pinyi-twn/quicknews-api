@@ -25,7 +25,7 @@ function formatTW(date) {
 // PART 1: Yahoo Finance 數據抓取
 // ══════════════════════════════════════════════════════════
 
-const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','NVDA','AAPL','TSLA','SPY','QQQ'];
+const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE'];
 const STATIC_EPS = { NVDA:2.13, AAPL:6.11, TSLA:2.28 };
 
 async function fetchYahooFinance() {
@@ -61,6 +61,7 @@ function computeMonitorData(yf) {
   const nvda = yf['NVDA'] || { price:0, ch:0 };
   const aapl = yf['AAPL'] || { price:0, ch:0 };
   const tsla = yf['TSLA'] || { price:0, ch:0 };
+  const meta = yf['META'] || { price:0, ch:0 };
   const tsmc = yf['2330.TW'] || { price:0, ch:0 };
 
   // 恐懼貪婪指數
@@ -72,7 +73,7 @@ function computeMonitorData(yf) {
   const twLong = Math.min(85, Math.max(30, Math.round(62 + twii.ch * 2)));
   const usLong = Math.min(85, Math.max(30, Math.round(55 + sp.ch * 3)));
 
-  // 美股機構資金流
+  // 美股機構資金流（推算）
   const instAmt  = (sp.ch * 38 + 12).toFixed(0);
   const hedgeAmt = (Math.abs(ixic.ch) * 15 + 5).toFixed(0);
   const retailAmt= (Math.abs(nvda.ch) * 8 + 3).toFixed(0);
@@ -82,20 +83,18 @@ function computeMonitorData(yf) {
   const foreignDir = (twii.ch > 0 && usd < 32.5) ? '+' : '-';
   const foreignAmt = foreignDir + (Math.abs(twii.ch) * 28 + 15).toFixed(0) + '億';
 
-  // P/E 計算
+  // P/E 計算（ETF 板塊：直接從 Yahoo Finance trailingPE 取得）
   const spyPE  = yf['SPY']?.trailingPE?.toFixed(1) || '23.1';
   const qqqPE  = yf['QQQ']?.trailingPE?.toFixed(1) || '36.4';
-  const calcPE = (sym) => {
-    const d = yf[sym]; if (!d) return '--';
-    const eps = d.trailingEps || STATIC_EPS[sym];
-    return (d.price && eps && eps > 0) ? (d.price / eps).toFixed(1) + 'x' : '--';
-  };
+  const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || '25.0';
+  const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || '16.0';
+  const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || '12.0';
 
-  // Short Interest
-const getShortNum = (sym, fb) => {
-  const s = yf[sym]?.shortPercent;
-  return s ? (s * 100).toFixed(1) : fb;
-};
+  // Short Interest（%數字，不帶單位，前端自行格式化）
+  const getShortNum = (sym, fb) => {
+    const s = yf[sym]?.shortPercent;
+    return s ? (s * 100).toFixed(1) : fb;
+  };
 
   const fmt = (p, ch) => `${p.toLocaleString()} (${ch>=0?'+':''}${ch}%)`;
 
@@ -110,24 +109,103 @@ const getShortNum = (sym, fb) => {
     { title:'NVDA 輝達',         value: fmt(nvda.price, nvda.ch) },
     { title:'AAPL 蘋果',         value: fmt(aapl.price, aapl.ch) },
     { title:'TSLA 特斯拉',       value: fmt(tsla.price, tsla.ch) },
-    // 多空比
-    { title:'台股多空%', value: String(twLong) },
-    { title:'美股多空%', value: String(usLong) },
-    // 本益比
+    // 多空比（數字格式，前端直接 parseFloat）
+    { title:'台股多頭%',          value: String(twLong) },
+    { title:'美股多頭%',          value: String(usLong) },
+    // 本益比：ETF 板塊（XLK/XLF/XLE 從 Yahoo Finance trailingPE 取得）
     { title:'S&P500 P/E (SPY)',   value: spyPE + 'x' },
     { title:'那斯達克 P/E (QQQ)', value: qqqPE + 'x' },
-    { title:'NVDA 輝達 P/E',           value: calcPE('NVDA') },
-    { title:'AAPL 蘋果 P/E',           value: calcPE('AAPL') },
-    { title:'TSLA 特斯拉 P/E',           value: calcPE('TSLA') },
-    // Short Interest
-    { title:'NVDA 短空%', value: getShortNum('NVDA', '2.1') },
-    { title:'TSLA 短空%', value: getShortNum('TSLA', '8.4') },
-    { title:'SPY 短空%', value: getShortNum('SPY', '2.5') },
+    { title:'科技 XLK P/E',       value: xlkPE + 'x' },
+    { title:'金融 XLF P/E',       value: xlfPE + 'x' },
+    { title:'能源 XLE P/E',       value: xlePE + 'x' },
+    // Short Interest（純數字，前端讀取後自行加 % 顯示）
+    { title:'NVDA 短空%',         value: getShortNum('NVDA', '2.1') },
+    { title:'TSLA 短空%',         value: getShortNum('TSLA', '8.4') },
+    { title:'SPY 短空%',          value: getShortNum('SPY',  '2.5') },
+    { title:'AAPL 短空%',         value: getShortNum('AAPL', '0.8') },
+    { title:'META 短空%',         value: getShortNum('META', '1.2') },
   ];
 }
 
+// ── TWSE 三大法人買賣超 ─────────────────────────────────────
+async function fetchTWSEInstitutional() {
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BFIAUU', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) return null;
+
+    // TWSE 欄位名稱做防禦性查找
+    const find = name => data.find(row =>
+      Object.values(row).some(v => typeof v === 'string' && v.includes(name))
+    );
+    // 買賣差額（千元）→ 億元
+    const toYi = row => {
+      const raw = row['買賣差額(千元)'] || row['買賣差額'] || row['diff'] || row['netBuySell'] || '';
+      const n = parseFloat(String(raw).replace(/,/g, ''));
+      if (isNaN(n)) return null;
+      return +(n / 100000).toFixed(2);
+    };
+    const fmt = row => {
+      if (!row) return null;
+      const v = toYi(row);
+      if (v === null) return null;
+      return (v >= 0 ? '+' : '') + v.toFixed(1) + '億';
+    };
+
+    const foreign = find('外資及陸資') || find('外資');
+    const trust   = find('投信');
+    const dealer  = find('自營商');
+    const total   = find('三大法人') || find('合計');
+
+    const result = {};
+    if (fmt(foreign)) result['外資買賣超']   = fmt(foreign);
+    if (fmt(trust))   result['投信買賣超']   = fmt(trust);
+    if (fmt(dealer))  result['自營商買賣超'] = fmt(dealer);
+    if (fmt(total))   result['三大法人合計'] = fmt(total);
+    return Object.keys(result).length ? result : null;
+  } catch(e) {
+    console.log('TWSE institutional failed:', e.message);
+    return null;
+  }
+}
+
+// ── TWSE 個股外資買賣超 ─────────────────────────────────────
+async function fetchTWSEStockChips() {
+  const TW_STOCKS = ['2330','2454','2317','0050','2382','2303'];
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/TWT84U', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) return null;
+
+    const result = {};
+    for (const code of TW_STOCKS) {
+      const row = data.find(r =>
+        (r['證券代號'] || r['code'] || r['stockCode'] || '') === code
+      );
+      if (!row) continue;
+      const buy  = parseFloat(String(row['買進股數'] || row['buy'] || row['買進張數'] || '0').replace(/,/g,''));
+      const sell = parseFloat(String(row['賣出股數'] || row['sell'] || row['賣出張數'] || '0').replace(/,/g,''));
+      const diff = buy - sell;
+      const diffK = (diff / 1000).toFixed(0);
+      result[`${code} 買賣超`] = (diff >= 0 ? '+' : '') + diffK + '張';
+      const longBase = diff > 0 ? Math.min(80, 55 + Math.round(Math.abs(diff)/500)) : Math.max(25, 45 - Math.round(Math.abs(diff)/500));
+      result[`${code} 多頭%`] = String(longBase);
+    }
+    return Object.keys(result).length ? result : null;
+  } catch(e) {
+    console.log('TWSE stock chips failed:', e.message);
+    return null;
+  }
+}
+
 // ══════════════════════════════════════════════════════════
-// PART 2: 新聞 + AI（與之前相同）
+// PART 2: 新聞 + AI
 // ══════════════════════════════════════════════════════════
 
 async function fetchLatestNews() {
@@ -176,7 +254,6 @@ async function runNewsAI(items, apiKey) {
 }
 
 async function runMarketAI(items, apiKey) {
-  // ── 依標籤將新聞分為台股、美股兩組，確保 AI 分析內容有所區別 ──
   const TW_PATTERN = /台積電|台股|外資|法人|投信|自營|加權|聯發科|鴻海|廣達|聯電|玉山|兆豐|台幣/i;
   const US_PATTERN = /美股|Fed|聯準會|S&P|那斯達克|NVDA|輝達|AAPL|TSLA|Meta|降息|升息|利率|通膨|美元|道瓊|標普/i;
 
@@ -190,7 +267,6 @@ async function runMarketAI(items, apiKey) {
     US_PATTERN.test(n.title)
   );
 
-  // 若某側篩選後不足 2 則，fallback 全部（至少能有內容）
   const mkLines = arr => arr.map((n,i)=>`${i+1}. [${n.tag}] ${n.title}：${n.body}`).join('\n');
   const twHeadlines = mkLines(twItems.length >= 2 ? twItems : items);
   const usHeadlines = mkLines(usItems.length >= 2 ? usItems : items);
@@ -284,7 +360,7 @@ async function updateMonitorDB(monitorData, monitorPages, monDbId, notionKey) {
     const existing = monitorPages.find(p =>
       (p.properties?.Title?.title?.[0]?.text?.content || '') === item.title
     );
-    if (!existing) { skipped++; continue; } // 只更新已存在的列
+    if (!existing) { skipped++; continue; }
 
     await fetch(`${NOTION_API}/pages/${existing.id}`, {
       method: 'PATCH',
@@ -325,13 +401,15 @@ export default async function handler(req, res) {
   try {
     console.log('Cron: 開始...');
 
-    // ① 同時抓：RSS + Notion 三個資料庫 + Yahoo Finance
-    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData] = await Promise.all([
+    // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE
+    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips] = await Promise.all([
       fetchLatestNews(),
       fetchExistingEntries(dbId, notionKey),
       aiDbId ? fetchExistingAnalyses(aiDbId, notionKey) : Promise.resolve([]),
       monDbId ? fetchMonitorPages(monDbId, notionKey) : Promise.resolve([]),
       fetchYahooFinance(),
+      fetchTWSEInstitutional(),
+      fetchTWSEStockChips(),
     ]);
     console.log(`Cron: RSS ${rssItems.length} / YF ${Object.keys(yfData).length} symbols`);
 
@@ -373,10 +451,46 @@ export default async function handler(req, res) {
       }
     }
 
-    // ⑦ 更新數據監控（用 Yahoo Finance 即時數據）
+    // ⑦ 更新數據監控（Yahoo Finance + TWSE）
     let monitorResult = { updated:0, skipped:0 };
     if (monDbId && Object.keys(yfData).length > 0) {
       const monitorData = computeMonitorData(yfData);
+
+      // 合併 TWSE 三大法人資料
+      if (twseInst) {
+        for (const [title, value] of Object.entries(twseInst)) {
+          const existing = monitorData.find(i => i.title === title);
+          if (existing) existing.value = value;
+          else monitorData.push({ title, value });
+        }
+        console.log(`Cron: TWSE 三大法人 ${Object.keys(twseInst).length} 筆`);
+      }
+
+      // 合併 TWSE 個股籌碼 + 滾動更新外資近10日
+      if (twseChips) {
+        for (const [title, value] of Object.entries(twseChips)) {
+          const existing = monitorData.find(i => i.title === title);
+          if (existing) existing.value = value;
+          else monitorData.push({ title, value });
+        }
+        if (twseInst?.['外資買賣超']) {
+          const todayNum = parseFloat(twseInst['外資買賣超'].replace(/[^0-9.-]/g, ''));
+          if (!isNaN(todayNum)) {
+            const flowRow = monitorPages.find(p =>
+              (p.properties?.Title?.title?.[0]?.text?.content || '') === '外資近10日買賣超'
+            );
+            const oldVal = flowRow?.properties?.Value?.rich_text?.[0]?.text?.content || '';
+            const vals = oldVal.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+            vals.push(todayNum);
+            const last10 = vals.slice(-10).join(',');
+            const flowItem = monitorData.find(i => i.title === '外資近10日買賣超');
+            if (flowItem) flowItem.value = last10;
+            else monitorData.push({ title:'外資近10日買賣超', value: last10 });
+          }
+        }
+        console.log(`Cron: TWSE 個股籌碼 ${Object.keys(twseChips).length} 筆`);
+      }
+
       monitorResult = await updateMonitorDB(monitorData, monitorPages, monDbId, notionKey);
       console.log(`Cron: 數據監控更新 ${monitorResult.updated} 筆`);
     }
@@ -391,6 +505,7 @@ export default async function handler(req, res) {
       aiAnalyses: aiResults,
       monitor: monitorResult,
       yahooFinance: Object.keys(yfData).length,
+      twse: { inst: !!twseInst, chips: !!twseChips },
       updatedAt: now,
     });
   } catch(e) {
