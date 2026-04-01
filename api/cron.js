@@ -92,10 +92,10 @@ function computeMonitorData(yf) {
   };
 
   // Short Interest
-  const getShort = (sym, fb) => {
-    const s = yf[sym]?.shortPercent;
-    return s ? (s * 100).toFixed(1) + '%' : fb;
-  };
+const getShortNum = (sym, fb) => {
+  const s = yf[sym]?.shortPercent;
+  return s ? (s * 100).toFixed(1) : fb;
+};
 
   const fmt = (p, ch) => `${p.toLocaleString()} (${ch>=0?'+':''}${ch}%)`;
 
@@ -110,28 +110,19 @@ function computeMonitorData(yf) {
     { title:'NVDA 輝達',         value: fmt(nvda.price, nvda.ch) },
     { title:'AAPL 蘋果',         value: fmt(aapl.price, aapl.ch) },
     { title:'TSLA 特斯拉',       value: fmt(tsla.price, tsla.ch) },
-    // 恐慌指數
-    { title:'台股恐懼貪婪指數',    value: `${twFG}（${fgLabel(twFG)}）` },
-    { title:'美股恐懼貪婪指數',    value: `${usFG}（${fgLabel(usFG)}）` },
     // 多空比
-    { title:'台股多空比',          value: `多 ${twLong}% : 空 ${100-twLong}%` },
-    { title:'美股多空比',          value: `多 ${usLong}% : 空 ${100-usLong}%` },
-    // 美股機構
-    { title:'美股機構法人資金流',   value: `${sp.ch>0?'+':'-'}${instAmt}億美元（${sp.ch>0?'淨流入':'淨流出'}）` },
-    { title:'美股避險基金方向',     value: `${vix<20&&ixic.ch>0?'+':'-'}${hedgeAmt}億美元（${vix<20&&ixic.ch>0?'偏多':'偏空'}）` },
-    { title:'美股散戶流向',        value: `${nvda.ch>0?'+':'-'}${retailAmt}億美元（${nvda.ch>0?'追漲買進':'停損賣出'}）` },
-    // 情緒探針
-    { title:'外資動向探針',        value: `${foreignAmt}（${twii.ch>0.5?'偏買超':twii.ch<-0.5?'偏賣超':'小幅波動'}）` },
-    { title:'散戶信心指數',        value: `${retailConf}（${retailConf>60?'偏樂觀':'偏保守'}）` },
+    { title:'台股多空%', value: String(twLong) },
+    { title:'美股多空%', value: String(usLong) },
     // 本益比
     { title:'S&P500 P/E (SPY)',   value: spyPE + 'x' },
     { title:'那斯達克 P/E (QQQ)', value: qqqPE + 'x' },
-    { title:'NVDA P/E',           value: calcPE('NVDA') },
-    { title:'AAPL P/E',           value: calcPE('AAPL') },
-    { title:'TSLA P/E',           value: calcPE('TSLA') },
+    { title:'NVDA 輝達 P/E',           value: calcPE('NVDA') },
+    { title:'AAPL 蘋果 P/E',           value: calcPE('AAPL') },
+    { title:'TSLA 特斯拉 P/E',           value: calcPE('TSLA') },
     // Short Interest
-    { title:'NVDA Short Interest', value: getShort('NVDA', '2.1%') },
-    { title:'TSLA Short Interest', value: getShort('TSLA', '8.4%') },
+    { title:'NVDA 短空%', value: getShortNum('NVDA', '2.1') },
+    { title:'TSLA 短空%', value: getShortNum('TSLA', '8.4') },
+    { title:'SPY 短空%', value: getShortNum('SPY', '2.5') },
   ];
 }
 
