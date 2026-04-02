@@ -52,6 +52,71 @@ async function fetchYahooFinance() {
   return results;
 }
 
+// ── 歷史收盤價（1年日線，用於情緒指標計算）─────────────────
+async function fetchYahooHistory(symbol) {
+  try {
+    const r = await fetch(`${YF_BASE}${symbol}?interval=1d&range=1y`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const data = await r.json();
+    const arr = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+    return (arr || []).filter(v => v != null);
+  } catch(e) { console.log(`History ${symbol} 失敗:`, e.message); return []; }
+}
+
+// ── MoodRing 情緒分數（同前端算法，server 端計算後存 Notion）──
+function moodRSI(closes, period=14) {
+  if (closes.length < period+1) return 50;
+  let avgGain=0, avgLoss=0;
+  for (let i=1;i<=period;i++) { const d=closes[i]-closes[i-1]; if(d>0)avgGain+=d; else avgLoss-=d; }
+  avgGain/=period; avgLoss/=period;
+  for (let i=period+1;i<closes.length;i++) {
+    const d=closes[i]-closes[i-1];
+    avgGain=(avgGain*(period-1)+Math.max(d,0))/period;
+    avgLoss=(avgLoss*(period-1)+Math.max(-d,0))/period;
+  }
+  return avgLoss===0?100:100-100/(1+avgGain/avgLoss);
+}
+function moodVsHigh(closes) {
+  const max52=Math.max(...closes.slice(-252));
+  return Math.max(0,Math.min(100,((closes[closes.length-1]/max52)*100-80)*5));
+}
+function moodMomentum(closes,period=20) {
+  if (closes.length<period+1) return 50;
+  const mom=((closes[closes.length-1]/closes[closes.length-1-period])-1)*100;
+  return Math.max(0,Math.min(100,(mom+10)*5));
+}
+function computeSentiment(closes) {
+  if (closes.length<30) return null;
+  const rsi=moodRSI(closes), vsHigh=moodVsHigh(closes), momentum=moodMomentum(closes);
+  const score=Math.round((rsi+vsHigh+momentum)/3);
+  return { score, rsi:Math.round(rsi), vsHigh:Math.round(vsHigh), momentum:Math.round(momentum) };
+}
+
+// ── TWSE 融資融券概況 ───────────────────────────────────────────
+async function fetchTWSEMargin() {
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    const row = data[0];
+    const result = {};
+    const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined) return row[k]; } return null; };
+    const marginBal  = get('融資餘額','融資金額','margin_balance');
+    const marginRate = get('融資使用率','margin_ratio');
+    const shortBal   = get('融券餘額','融券股數','short_balance');
+    const shortRate  = get('融券使用率','short_ratio');
+    if (marginBal)  result['融資餘額']   = String(marginBal).replace(/,/g,'');
+    if (marginRate) result['融資使用率'] = String(marginRate).replace(/%/,'');
+    if (shortBal)   result['融券餘額']   = String(shortBal).replace(/,/g,'');
+    if (shortRate)  result['融券使用率'] = String(shortRate).replace(/%/,'');
+    return Object.keys(result).length ? result : null;
+  } catch(e) { console.log('TWSE margin failed:', e.message); return null; }
+}
+
 function computeMonitorData(yf) {
   const vix  = yf['^VIX']?.price || 18;
   const twii = yf['^TWII'] || { price:0, ch:0 };
@@ -73,7 +138,7 @@ function computeMonitorData(yf) {
   const twLong = Math.min(85, Math.max(30, Math.round(62 + twii.ch * 2)));
   const usLong = Math.min(85, Math.max(30, Math.round(55 + sp.ch * 3)));
 
-  // 美股機構資金流（推算）
+  // 美股機構資金流
   const instAmt  = (sp.ch * 38 + 12).toFixed(0);
   const hedgeAmt = (Math.abs(ixic.ch) * 15 + 5).toFixed(0);
   const retailAmt= (Math.abs(nvda.ch) * 8 + 3).toFixed(0);
@@ -89,6 +154,11 @@ function computeMonitorData(yf) {
   const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || '25.0';
   const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || '16.0';
   const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || '12.0';
+  // 台積電 P/E（trailingPE 優先，其次 price/trailingEps）
+  const tsmcD  = yf['2330.TW'];
+  const tsmcPE = tsmcD?.trailingPE?.toFixed(1)
+    || (tsmcD?.price && tsmcD?.trailingEps && tsmcD.trailingEps > 0
+        ? (tsmcD.price / tsmcD.trailingEps).toFixed(1) : null);
 
   // Short Interest（%數字，不帶單位，前端自行格式化）
   const getShortNum = (sym, fb) => {
@@ -118,6 +188,7 @@ function computeMonitorData(yf) {
     { title:'科技 XLK P/E',       value: xlkPE + 'x' },
     { title:'金融 XLF P/E',       value: xlfPE + 'x' },
     { title:'能源 XLE P/E',       value: xlePE + 'x' },
+    ...(tsmcPE ? [{ title:'台積電 2330 P/E', value: tsmcPE + 'x' }] : []),
     // Short Interest（純數字，前端讀取後自行加 % 顯示）
     { title:'NVDA 短空%',         value: getShortNum('NVDA', '2.1') },
     { title:'TSLA 短空%',         value: getShortNum('TSLA', '8.4') },
@@ -137,11 +208,9 @@ async function fetchTWSEInstitutional() {
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
 
-    // TWSE 欄位名稱做防禦性查找
     const find = name => data.find(row =>
       Object.values(row).some(v => typeof v === 'string' && v.includes(name))
     );
-    // 買賣差額（千元）→ 億元
     const toYi = row => {
       const raw = row['買賣差額(千元)'] || row['買賣差額'] || row['diff'] || row['netBuySell'] || '';
       const n = parseFloat(String(raw).replace(/,/g, ''));
@@ -192,8 +261,8 @@ async function fetchTWSEStockChips() {
       const buy  = parseFloat(String(row['買進股數'] || row['buy'] || row['買進張數'] || '0').replace(/,/g,''));
       const sell = parseFloat(String(row['賣出股數'] || row['sell'] || row['賣出張數'] || '0').replace(/,/g,''));
       const diff = buy - sell;
-      const diffK = (diff / 1000).toFixed(0);
-      result[`${code} 買賣超`] = (diff >= 0 ? '+' : '') + diffK + '張';
+      const diffYi = (diff / 1000).toFixed(0);
+      result[`${code} 買賣超`] = (diff >= 0 ? '+' : '') + diffYi + '張';
       const longBase = diff > 0 ? Math.min(80, 55 + Math.round(Math.abs(diff)/500)) : Math.max(25, 45 - Math.round(Math.abs(diff)/500));
       result[`${code} 多頭%`] = String(longBase);
     }
@@ -314,202 +383,4 @@ function isManuallyEdited(page) {
 async function archiveStaleEntries(pages, freshTitleSet, notionKey) {
   let archived=0; const kept={pinned:0,fresh:0,edited:0};
   for (const page of pages) {
-    const title=page.properties?.Title?.title?.[0]?.text?.content||'';
-    const pinned=page.properties?.Pinned?.checkbox===true;
-    if (pinned) { kept.pinned++; continue; }
-    if (freshTitleSet.has(title)) { kept.fresh++; continue; }
-    if (isManuallyEdited(page)) { kept.edited++; continue; }
-    await fetch(`${NOTION_API}/pages/${page.id}`,{method:'PATCH',headers:notionHeaders(notionKey),body:JSON.stringify({archived:true})});
-    archived++;
-  }
-  return { archived, kept };
-}
-
-async function writeNewNews(items, dbId, notionKey) {
-  const now = formatTW(new Date()).full;
-  await Promise.all(items.map(item=>fetch(`${NOTION_API}/pages`,{method:'POST',headers:notionHeaders(notionKey),body:JSON.stringify({
-    parent:{database_id:dbId},
-    properties:{
-      'Title':{title:[{text:{content:item.title}}]},'Body':{rich_text:[{text:{content:item.body||''}}]},'AI':{rich_text:[{text:{content:item.ai||''}}]},
-      'Tag':{select:{name:item.tag}},'TC':{rich_text:[{text:{content:item.tc}}]},'URL':{url:item.url||null},'Time':{rich_text:[{text:{content:item.t}}]},
-      'Active':{checkbox:true},'Pinned':{checkbox:false},
-      'Source':{rich_text:[{text:{content:`新聞：Google News RSS｜AI：Claude Haiku｜${now}`}}]},
-      'UpdatedAt':{rich_text:[{text:{content:now}}]},
-    }
-  })})));
-}
-
-async function upsertAnalysis(title, type, content, source, existingPages, aiDbId, notionKey) {
-  const now = formatTW(new Date()).full;
-  const existing = existingPages.find(p=>(p.properties?.Title?.title?.[0]?.text?.content||'')===title);
-  if (existing) {
-    if (existing.properties?.Pinned?.checkbox===true || isManuallyEdited(existing)) return 'skipped';
-    await fetch(`${NOTION_API}/pages/${existing.id}`,{method:'PATCH',headers:notionHeaders(notionKey),body:JSON.stringify({properties:{'Content':{rich_text:[{text:{content}}]},'Source':{rich_text:[{text:{content:source}}]},'UpdatedAt':{rich_text:[{text:{content:now}}]}}})});
-    return 'updated';
-  }
-  await fetch(`${NOTION_API}/pages`,{method:'POST',headers:notionHeaders(notionKey),body:JSON.stringify({parent:{database_id:aiDbId},properties:{'Title':{title:[{text:{content:title}}]},'Type':{select:{name:type}},'Content':{rich_text:[{text:{content}}]},'Source':{rich_text:[{text:{content:source}}]},'Active':{checkbox:true},'Pinned':{checkbox:false},'UpdatedAt':{rich_text:[{text:{content:now}}]}}})});
-  return 'created';
-}
-
-// ── 更新數據監控 ────────────────────────────────────────
-async function updateMonitorDB(monitorData, monitorPages, monDbId, notionKey) {
-  const now = formatTW(new Date()).full;
-  let updated = 0, skipped = 0;
-
-  for (const item of monitorData) {
-    const existing = monitorPages.find(p =>
-      (p.properties?.Title?.title?.[0]?.text?.content || '') === item.title
-    );
-    if (!existing) { skipped++; continue; }
-
-    await fetch(`${NOTION_API}/pages/${existing.id}`, {
-      method: 'PATCH',
-      headers: notionHeaders(notionKey),
-      body: JSON.stringify({
-        properties: {
-          'Value':     { rich_text: [{ text: { content: item.value } }] },
-          'UpdatedAt': { rich_text: [{ text: { content: now } }] },
-        }
-      })
-    });
-    updated++;
-  }
-  return { updated, skipped };
-}
-
-// ══════════════════════════════════════════════════════════
-// HANDLER
-// ══════════════════════════════════════════════════════════
-
-export default async function handler(req, res) {
-  const authHeader = req.headers['authorization'];
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    if (authHeader) return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const notionKey    = process.env.NOTION_API_KEY;
-  const dbId         = process.env.NOTION_DB_ID;
-  const aiDbId       = process.env.NOTION_AI_DB_ID;
-  const monDbId      = process.env.NOTION_MONITOR_DB_ID;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-
-  if (!notionKey || !dbId) {
-    return res.status(500).json({ error: 'NOTION_API_KEY or NOTION_DB_ID not set' });
-  }
-
-  try {
-    console.log('Cron: 開始...');
-
-    // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE
-    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips] = await Promise.all([
-      fetchLatestNews(),
-      fetchExistingEntries(dbId, notionKey),
-      aiDbId ? fetchExistingAnalyses(aiDbId, notionKey) : Promise.resolve([]),
-      monDbId ? fetchMonitorPages(monDbId, notionKey) : Promise.resolve([]),
-      fetchYahooFinance(),
-      fetchTWSEInstitutional(),
-      fetchTWSEStockChips(),
-    ]);
-    console.log(`Cron: RSS ${rssItems.length} / YF ${Object.keys(yfData).length} symbols`);
-
-    // ② 新聞增量
-    const newItems = rssItems.filter(item => !existingTitles.has(item.title));
-
-    // ③ AI 解析
-    let aiTexts = [];
-    let marketAI = { twChip:'', usChip:'', twSent:'', usSent:'' };
-    if (anthropicKey) {
-      const tasks = [];
-      if (newItems.length > 0) tasks.push(runNewsAI(newItems, anthropicKey).then(r=>{aiTexts=r;}));
-      if (aiDbId && rssItems.length > 0) tasks.push(runMarketAI(rssItems, anthropicKey).then(r=>{marketAI=r;}));
-      try { await Promise.all(tasks); } catch(e) { console.error('AI失敗',e.message); }
-    }
-    const enriched = newItems.map((item,i) => ({...item, ai:aiTexts[i]||''}));
-
-    // ④ 封存過時新聞
-    const freshTitleSet = new Set(rssItems.map(i=>i.title));
-    const { archived: archivedCount, kept: keptDetail } = await archiveStaleEntries(existingPages, freshTitleSet, notionKey);
-
-    // ⑤ 寫入新新聞
-    if (enriched.length > 0) await writeNewNews(enriched, dbId, notionKey);
-
-    // ⑥ 寫入 AI 分析
-    const aiResults = {};
-    const now = formatTW(new Date()).full;
-    if (aiDbId) {
-      const analyses = [
-        { title:'台股籌碼解讀', type:'台股籌碼', content:marketAI.twChip, source:`Claude Haiku｜Google News ${rssItems.length}則｜${now}` },
-        { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則｜${now}` },
-        { title:'台股市場情緒', type:'台股市場情緒', content:marketAI.twSent, source:`Claude Haiku｜台股新聞→情緒判斷｜${now}` },
-        { title:'美股市場情緒', type:'美股市場情緒', content:marketAI.usSent, source:`Claude Haiku｜美股新聞→情緒判斷｜${now}` },
-      ];
-      for (const a of analyses) {
-        if (a.content) {
-          aiResults[a.title] = await upsertAnalysis(a.title, a.type, a.content, a.source, existingAnalyses, aiDbId, notionKey);
-        }
-      }
-    }
-
-    // ⑦ 更新數據監控（Yahoo Finance + TWSE）
-    let monitorResult = { updated:0, skipped:0 };
-    if (monDbId && Object.keys(yfData).length > 0) {
-      const monitorData = computeMonitorData(yfData);
-
-      // 合併 TWSE 三大法人資料
-      if (twseInst) {
-        for (const [title, value] of Object.entries(twseInst)) {
-          const existing = monitorData.find(i => i.title === title);
-          if (existing) existing.value = value;
-          else monitorData.push({ title, value });
-        }
-        console.log(`Cron: TWSE 三大法人 ${Object.keys(twseInst).length} 筆`);
-      }
-
-      // 合併 TWSE 個股籌碼 + 滾動更新外資近10日
-      if (twseChips) {
-        for (const [title, value] of Object.entries(twseChips)) {
-          const existing = monitorData.find(i => i.title === title);
-          if (existing) existing.value = value;
-          else monitorData.push({ title, value });
-        }
-        if (twseInst?.['外資買賣超']) {
-          const todayNum = parseFloat(twseInst['外資買賣超'].replace(/[^0-9.-]/g, ''));
-          if (!isNaN(todayNum)) {
-            const flowRow = monitorPages.find(p =>
-              (p.properties?.Title?.title?.[0]?.text?.content || '') === '外資近10日買賣超'
-            );
-            const oldVal = flowRow?.properties?.Value?.rich_text?.[0]?.text?.content || '';
-            const vals = oldVal.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
-            vals.push(todayNum);
-            const last10 = vals.slice(-10).join(',');
-            const flowItem = monitorData.find(i => i.title === '外資近10日買賣超');
-            if (flowItem) flowItem.value = last10;
-            else monitorData.push({ title:'外資近10日買賣超', value: last10 });
-          }
-        }
-        console.log(`Cron: TWSE 個股籌碼 ${Object.keys(twseChips).length} 筆`);
-      }
-
-      monitorResult = await updateMonitorDB(monitorData, monitorPages, monDbId, notionKey);
-      console.log(`Cron: 數據監控更新 ${monitorResult.updated} 筆`);
-    }
-
-    return res.status(200).json({
-      success: true,
-      rss: rssItems.length,
-      newCount: enriched.length,
-      aiCount: aiTexts.length,
-      archived: archivedCount,
-      kept: keptDetail,
-      aiAnalyses: aiResults,
-      monitor: monitorResult,
-      yahooFinance: Object.keys(yfData).length,
-      twse: { inst: !!twseInst, chips: !!twseChips },
-      updatedAt: now,
-    });
-  } catch(e) {
-    console.error('Cron error:', e.message);
-    return res.status(500).json({ error: e.message });
-  }
-}
+    const title=page.properties?.Title?.title?.[0]?.text?.
