@@ -25,7 +25,7 @@ function formatTW(date) {
 // PART 1: Yahoo Finance 數據抓取
 // ══════════════════════════════════════════════════════════
 
-const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE'];
+const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE'];
 const STATIC_EPS = { NVDA:2.13, AAPL:6.11, TSLA:2.28 };
 
 async function fetchYahooFinance() {
@@ -93,6 +93,21 @@ function computeSentiment(closes) {
   return { score, rsi:Math.round(rsi), vsHigh:Math.round(vsHigh), momentum:Math.round(momentum) };
 }
 
+// ── FRED 總經數據（DGS10 / T10Y2Y / FEDFUNDS）──────────────────
+async function fetchFRED(seriesId) {
+  const apiKey = process.env.FRED_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=3`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    // 找最近一筆非空值（FRED 有時最新一筆為'.'）
+    const obs = (data?.observations || []).find(o => o.value && o.value !== '.');
+    return obs ? obs.value : null;
+  } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
+}
+
 // ── TWSE 融資融券概況 ───────────────────────────────────────────
 async function fetchTWSEMargin() {
   try {
@@ -129,38 +144,37 @@ function computeMonitorData(yf) {
   const meta = yf['META'] || { price:0, ch:0 };
   const tsmc = yf['2330.TW'] || { price:0, ch:0 };
 
-  // 恐懼貪婪指數
   const twFG = Math.max(5, Math.min(95, Math.round(100 - ((vix - 10) / 25) * 80)));
   const usFG = Math.max(5, Math.min(95, Math.round(100 - ((vix - 10) / 28) * 80)));
-  const fgLabel = v => v>=75?'極度貪婪':v>=60?'貪婪':v>=40?'中性':v>=25?'恐懼':'極度恐懼';
+  const fgLabel = v => v>=75?'極度貪婪':v>=60?'貪婪':v>=40?'中性':v>=25?'恐懼':'極度恐懾';
 
-  // 多空比
   const twLong = Math.min(85, Math.max(30, Math.round(62 + twii.ch * 2)));
   const usLong = Math.min(85, Math.max(30, Math.round(55 + sp.ch * 3)));
 
-  // 美股機構資金流
   const instAmt  = (sp.ch * 38 + 12).toFixed(0);
   const hedgeAmt = (Math.abs(ixic.ch) * 15 + 5).toFixed(0);
   const retailAmt= (Math.abs(nvda.ch) * 8 + 3).toFixed(0);
 
-  // 情緒探針
   const retailConf = Math.max(20, Math.min(85, Math.round(50 + twii.ch * 4 - (vix - 15))));
   const foreignDir = (twii.ch > 0 && usd < 32.5) ? '+' : '-';
   const foreignAmt = foreignDir + (Math.abs(twii.ch) * 28 + 15).toFixed(0) + '億';
 
-  // P/E 計算（ETF 板塊：直接從 Yahoo Finance trailingPE 取得）
   const spyPE  = yf['SPY']?.trailingPE?.toFixed(1) || '23.1';
   const qqqPE  = yf['QQQ']?.trailingPE?.toFixed(1) || '36.4';
   const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || '25.0';
   const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || '16.0';
   const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || '12.0';
-  // 台積電 P/E（trailingPE 優先，其次 price/trailingEps）
+
   const tsmcD  = yf['2330.TW'];
   const tsmcPE = tsmcD?.trailingPE?.toFixed(1)
     || (tsmcD?.price && tsmcD?.trailingEps && tsmcD.trailingEps > 0
         ? (tsmcD.price / tsmcD.trailingEps).toFixed(1) : null);
 
-  // Short Interest（%數字，不帶單位，前端自行格式化）
+  const etf0050D  = yf['0050.TW'];
+  const etf0050PE = etf0050D?.trailingPE?.toFixed(1)
+    || (etf0050D?.price && etf0050D?.trailingEps && etf0050D.trailingEps > 0
+        ? (etf0050D.price / etf0050D.trailingEps).toFixed(1) : null);
+
   const getShortNum = (sym, fb) => {
     const s = yf[sym]?.shortPercent;
     return s ? (s * 100).toFixed(1) : fb;
@@ -169,7 +183,6 @@ function computeMonitorData(yf) {
   const fmt = (p, ch) => `${p.toLocaleString()} (${ch>=0?'+':''}${ch}%)`;
 
   return [
-    // 指數報價
     { title:'VIX 恐慌指數',      value: vix.toFixed(1) },
     { title:'加權指數 TWII',      value: fmt(twii.price, twii.ch) },
     { title:'那斯達克 IXIC',      value: fmt(ixic.price, ixic.ch) },
@@ -179,17 +192,15 @@ function computeMonitorData(yf) {
     { title:'NVDA 輝達',         value: fmt(nvda.price, nvda.ch) },
     { title:'AAPL 蘋果',         value: fmt(aapl.price, aapl.ch) },
     { title:'TSLA 特斯拉',       value: fmt(tsla.price, tsla.ch) },
-    // 多空比（數字格式，前端直接 parseFloat）
     { title:'台股多頭%',          value: String(twLong) },
     { title:'美股多頭%',          value: String(usLong) },
-    // 本益比：ETF 板塊（XLK/XLF/XLE 從 Yahoo Finance trailingPE 取得）
     { title:'S&P500 P/E (SPY)',   value: spyPE + 'x' },
     { title:'那斯達克 P/E (QQQ)', value: qqqPE + 'x' },
     { title:'科技 XLK P/E',       value: xlkPE + 'x' },
     { title:'金融 XLF P/E',       value: xlfPE + 'x' },
     { title:'能源 XLE P/E',       value: xlePE + 'x' },
-    ...(tsmcPE ? [{ title:'台積電 2330 P/E', value: tsmcPE + 'x' }] : []),
-    // Short Interest（純數字，前端讀取後自行加 % 顯示）
+    ...(tsmcPE    ? [{ title:'台積電 2330 P/E',   value: tsmcPE    + 'x' }] : []),
+    ...(etf0050PE ? [{ title:'元大50 P/E (0050)', value: etf0050PE + 'x' }] : []),
     { title:'NVDA 短空%',         value: getShortNum('NVDA', '2.1') },
     { title:'TSLA 短空%',         value: getShortNum('TSLA', '8.4') },
     { title:'SPY 短空%',          value: getShortNum('SPY',  '2.5') },
@@ -367,20 +378,4 @@ async function fetchExistingAnalyses(aiDbId, notionKey) {
 
 async function fetchMonitorPages(monDbId, notionKey) {
   const r = await fetch(`${NOTION_API}/databases/${monDbId}/query`, { method:'POST', headers:notionHeaders(notionKey), body:JSON.stringify({ page_size:100 }) });
-  const data = await r.json(); return data.results||[];
-}
-
-function isManuallyEdited(page) {
-  const lastEdited = new Date(page.last_edited_time);
-  const s = page.properties?.UpdatedAt?.rich_text?.[0]?.text?.content||'';
-  if (!s) return true;
-  const parts = s.match(/(\d{4})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})/);
-  if (!parts) return true;
-  const cronTime = new Date(Date.UTC(parseInt(parts[1]),parseInt(parts[2])-1,parseInt(parts[3]),parseInt(parts[4])-8,parseInt(parts[5])));
-  return isNaN(cronTime) || (lastEdited - cronTime) > 2*60*1000;
-}
-
-async function archiveStaleEntries(pages, freshTitleSet, notionKey) {
-  let archived=0; const kept={pinned:0,fresh:0,edited:0};
-  for (const page of pages) {
-    const title=page.properties?.Title?.title?.[0]?.text?.
+  const data = await r
