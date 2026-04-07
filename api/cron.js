@@ -188,9 +188,10 @@ function computeMonitorData(yf) {
   // P/E 計算（ETF 板塊：直接從 Yahoo Finance trailingPE 取得）
   const spyPE  = yf['SPY']?.trailingPE?.toFixed(1) || '23.1';
   const qqqPE  = yf['QQQ']?.trailingPE?.toFixed(1) || '36.4';
-  const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || '25.0';
-  const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || '16.0';
-  const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || '12.0';
+  const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || null;
+  const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || null;
+  const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || null;
+
   // 台積電 P/E（trailingPE 優先，其次 price/trailingEps）
   const tsmcD  = yf['2330.TW'];
   const tsmcPE = tsmcD?.trailingPE?.toFixed(1)
@@ -227,9 +228,9 @@ function computeMonitorData(yf) {
     // 本益比：ETF 板塊（XLK/XLF/XLE 從 Yahoo Finance trailingPE 取得）
     { title:'S&P500 P/E (SPY)',   value: spyPE + 'x' },
     { title:'那斯達克 P/E (QQQ)', value: qqqPE + 'x' },
-    { title:'科技 XLK P/E',       value: xlkPE + 'x' },
-    { title:'金融 XLF P/E',       value: xlfPE + 'x' },
-    { title:'能源 XLE P/E',       value: xlePE + 'x' },
+    ...(xlkPE ? [{ title:'科技 XLK P/E', value: xlkPE + 'x' }] : []),
+    ...(xlfPE ? [{ title:'金融 XLF P/E', value: xlfPE + 'x' }] : []),
+    ...(xlePE ? [{ title:'能源 XLE P/E', value: xlePE + 'x' }] : []),
     ...(tsmcPE    ? [{ title:'台積電 2330 P/E',   value: tsmcPE    + 'x' }] : []),
     ...(etf0050PE ? [{ title:'元大50 P/E (0050)', value: etf0050PE + 'x' }] : []),
     // Short Interest（純數字，前端讀取後自行加 % 顯示）
@@ -251,35 +252,52 @@ async function fetchTWSEInstitutional() {
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
 
-    // TWSE 欄位名稱可能為中文或英文，做防禦性查找
-    const find = name => data.find(row =>
-      Object.values(row).some(v => typeof v === 'string' && v.includes(name))
+    // Debug log first row structure
+    console.log('TWSE BFIAUU[0]:', JSON.stringify(data[0]));
+
+    const find = (...keywords) => data.find(row =>
+      Object.values(row).some(v => typeof v === 'string' && keywords.some(kw => v.includes(kw)))
     );
-    // 買賣差額（千元）→ 億元
+
+    // 取買賣差額（千元）→ 億元：優先用 Diff 欄位，否則從 Buy-Sell 計算
     const toYi = row => {
-      // 嘗試多個可能的欄位名稱
-      const raw = row['買賣差額(千元)'] || row['買賣差額'] || row['diff'] || row['netBuySell'] || '';
-      const n = parseFloat(String(raw).replace(/,/g, ''));
-      if (isNaN(n)) return null;
-      return +(n / 100000).toFixed(2); // 千元 → 億元
-    };
-    const fmt = row => {
       if (!row) return null;
+      // Try direct diff field (multiple possible names)
+      for (const k of ['Diff','diff','買賣差額(千元)','買賣差額','netBuySell','Net']) {
+        if (row[k] !== undefined) {
+          const n = parseFloat(String(row[k]).replace(/,/g,''));
+          if (!isNaN(n)) return +(n / 100000).toFixed(2);
+        }
+      }
+      // Fallback: compute Buy - Sell
+      const buyRaw  = row.Buy  ?? row['BuyAmt']  ?? row['買進金額(千元)'] ?? row['買進金額'];
+      const sellRaw = row.Sell ?? row['SellAmt'] ?? row['賣出金額(千元)'] ?? row['賣出金額'];
+      if (buyRaw != null && sellRaw != null) {
+        const buy  = parseFloat(String(buyRaw).replace(/,/g,''));
+        const sell = parseFloat(String(sellRaw).replace(/,/g,''));
+        if (!isNaN(buy) && !isNaN(sell)) return +((buy - sell) / 100000).toFixed(2);
+      }
+      return null;
+    };
+
+    const fmt = row => {
       const v = toYi(row);
       if (v === null) return null;
       return (v >= 0 ? '+' : '') + v.toFixed(1) + '億';
     };
 
-    const foreign = find('外資及陸資') || find('外資');
-    const trust   = find('投信');
-    const dealer  = find('自營商');
-    const total   = find('三大法人') || find('合計');
+    const foreign = find('外資及陸資','外資','FINI','Foreign');
+    const trust   = find('投信','Trust');
+    const dealer  = find('自營商','Dealer','Proprietary');
+    const total   = find('三大法人','合計','Total');
 
     const result = {};
-    if (fmt(foreign)) result['外資買賣超']   = fmt(foreign);
-    if (fmt(trust))   result['投信買賣超']   = fmt(trust);
-    if (fmt(dealer))  result['自營商買賣超'] = fmt(dealer);
-    if (fmt(total))   result['三大法人合計'] = fmt(total);
+    const fF = fmt(foreign), fT = fmt(trust), fD = fmt(dealer), fTot = fmt(total);
+    if (fF)   result['外資買賣超']   = fF;
+    if (fT)   result['投信買賣超']   = fT;
+    if (fD)   result['自營商買賣超'] = fD;
+    if (fTot) result['三大法人合計'] = fTot;
+    console.log('TWSE institutional:', result);
     return Object.keys(result).length ? result : null;
   } catch(e) {
     console.log('TWSE institutional failed:', e.message);
