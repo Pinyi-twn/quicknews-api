@@ -259,25 +259,16 @@ async function fetchTWSEMarketDividend() {
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
     console.log('TWSE BWIBBU_ALL keys:', Object.keys(data[0]), 'row0:', JSON.stringify(data[0]));
-    // 計算全市場殖利率加權平均（取樣前200筆可交易股票）
-    const yields = data.slice(0, 200).map(row => {
-      const v = parseFloat(
-        row['殖利率(%)'] || row['殖利率'] || row['DividendYield'] || row['Yield'] || '0'
-      );
-      return isNaN(v) ? 0 : v;
-    }).filter(v => v > 0);
+    // 計算全市場殖利率加權平均（取樣所有可交易股票）
+    const all = data.filter(row => {
+      const y = parseFloat(row['殖利率(%)'] || row['殖利率'] || row['DividendYield'] || row['Yield'] || '0');
+      return !isNaN(y) && y > 0;
+    });
+    const yields = all.map(row => parseFloat(row['殖利率(%)'] || row['殖利率'] || row['DividendYield'] || row['Yield'] || '0'));
     if (!yields.length) return null;
-    const avg = (yields.reduce((a, b) => a + b, 0) / yields.length).toFixed(2);
-    // 同時取台積電實際 P/E
-    // Find TSMC row by stock code 2330
-    const tsmcRow = data.find(row => {
-      const vals = Object.values(row).map(v => String(v));
-      return vals.includes('2330') || vals.some(v => v === '2330');
-    }) || data.find(row =>
-      Object.values(row).some(v => String(v).includes('2330'))
-    );
-    if (tsmcRow) console.log('TSMC row keys:', Object.keys(tsmcRow), 'values:', JSON.stringify(tsmcRow));
-    // P/E field may be '本益比(倍)', '本益比', 'PERatio', 'PE', etc.
+    const avgYield = (yields.reduce((a, b) => a + b, 0) / yields.length).toFixed(2);
+
+    // 全市場平均本益比（過濾合理範圍 0~300）
     const getPE = row => {
       if (!row) return null;
       const keys = Object.keys(row);
@@ -285,10 +276,27 @@ async function fetchTWSEMarketDividend() {
       if (peKey) return parseFloat(String(row[peKey]).replace(/,/g,'')) || null;
       return null;
     };
+    const allPEs = all.map(getPE).filter(v => v && v > 0 && v < 300);
+    const avgPE = allPEs.length ? (allPEs.reduce((a,b)=>a+b,0)/allPEs.length).toFixed(1) : null;
+
+    // 高殖利率家數（殖利率 ≥4%）
+    const highYieldCount = yields.filter(v => v >= 4).length;
+
+    // 台積電實際 P/E
+    const tsmcRow = data.find(row => {
+      const vals = Object.values(row).map(v => String(v));
+      return vals.includes('2330') || vals.some(v => v === '2330');
+    }) || data.find(row =>
+      Object.values(row).some(v => String(v).includes('2330'))
+    );
+    if (tsmcRow) console.log('TSMC row keys:', Object.keys(tsmcRow), 'values:', JSON.stringify(tsmcRow));
     const tsmcPE = getPE(tsmcRow);
+    console.log(`BWIBBU_ALL: avgYield=${avgYield} avgPE=${avgPE} highYield≥4%=${highYieldCount} tsmcPE=${tsmcPE}`);
     return {
-      yield: avg + '%',
-      tsmcPE: tsmcPE ? tsmcPE.toFixed(1) + 'x' : null,
+      yield: avgYield + '%',
+      tsmcPE:        tsmcPE        ? tsmcPE.toFixed(1) + 'x'   : null,
+      marketPE:      avgPE         ? avgPE + 'x'                : null,
+      highYieldCount: String(highYieldCount),
     };
   } catch(e) { console.log('TWSE BWIBBU_ALL failed:', e.message); return null; }
 }
@@ -808,17 +816,27 @@ export default async function handler(req, res) {
         console.log(`Cron: TWSE 市場廣度 ${Object.keys(twseBreadth).length} 筆`);
       }
 
-      // 合併 TWSE 殖利率（BWIBBU_ALL）
+      // 合併 TWSE 殖利率 + 全市場本益比（BWIBBU_ALL）
       if (twseDividend) {
-        if (twseDividend.yield) {
-          const ex = monitorData.find(i => i.title === '台股平均殖利率');
-          if (ex) ex.value = twseDividend.yield; else monitorData.push({ title:'台股平均殖利率', value: twseDividend.yield });
+        const dvItems = [
+          twseDividend.yield          ? { title:'台股平均殖利率', value: twseDividend.yield }          : null,
+          twseDividend.tsmcPE         ? { title:'台積電 P/E',    value: twseDividend.tsmcPE }         : null,
+          twseDividend.marketPE       ? { title:'台股平均本益比', value: twseDividend.marketPE }       : null,
+          twseDividend.highYieldCount ? { title:'高殖利率家數',   value: twseDividend.highYieldCount } : null,
+        ].filter(Boolean);
+        for (const item of dvItems) {
+          const ex = monitorData.find(i => i.title === item.title);
+          if (ex) ex.value = item.value; else monitorData.push(item);
         }
-        if (twseDividend.tsmcPE) {
-          const ex = monitorData.find(i => i.title === '台積電 P/E');
-          if (ex) ex.value = twseDividend.tsmcPE; else monitorData.push({ title:'台積電 P/E', value: twseDividend.tsmcPE });
-        }
-        console.log(`Cron: TWSE 殖利率=${twseDividend.yield} 台積電PE=${twseDividend.tsmcPE}`);
+        console.log(`Cron: BWIBBU_ALL 殖利率=${twseDividend.yield} 台積電PE=${twseDividend.tsmcPE} 市場PE=${twseDividend.marketPE} 高殖利率家數=${twseDividend.highYieldCount}`);
+      }
+
+      // 台股今日漲跌幅（Yahoo Finance ^TWII）
+      const twiiCh = yfData['^TWII']?.ch;
+      if (twiiCh != null) {
+        const chStr = (twiiCh >= 0 ? '+' : '') + twiiCh.toFixed(2) + '%';
+        const ex = monitorData.find(i => i.title === '台股今日漲跌幅');
+        if (ex) ex.value = chStr; else monitorData.push({ title:'台股今日漲跌幅', value: chStr });
       }
 
       // 合併情緒指標（MoodRing 算法，1年日線計算）
