@@ -281,7 +281,10 @@ async function tryTWSEMainSite() {
     const toYi = row => {
       const raw = row[diffIdx];
       const n = parseFloat(String(raw).replace(/,/g, ''));
-      return isNaN(n) ? null : +(n / 100000).toFixed(2);
+      if (isNaN(n)) return null;
+      let yi = n / 100000;
+      if (Math.abs(yi) > 5000) yi = n / 100000000;
+      return +yi.toFixed(2);
     };
     const fmt = row => { const v = toYi(row); return v === null ? null : (v>=0?'+':'')+v.toFixed(1)+'億'; };
     const find = (...kws) => json.data.find(row => kws.some(kw => String(row[nameIdx]).includes(kw)));
