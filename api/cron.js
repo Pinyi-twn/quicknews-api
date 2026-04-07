@@ -25,8 +25,7 @@ function formatTW(date) {
 // PART 1: Yahoo Finance 數據抓取
 // ══════════════════════════════════════════════════════════
 
-const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE'];
-const STATIC_EPS = { NVDA:2.13, AAPL:6.11, TSLA:2.28 };
+const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE','GC=F','CL=F'];
 
 async function fetchYahooFinance() {
   const results = {};
@@ -93,12 +92,13 @@ function computeSentiment(closes) {
   return { score, rsi:Math.round(rsi), vsHigh:Math.round(vsHigh), momentum:Math.round(momentum) };
 }
 
-// ── FRED 總經數據（DGS10 / T10Y2Y / FEDFUNDS）──────────────────
-async function fetchFRED(seriesId) {
+// ── FRED 總經數據（DGS10 / T10Y2Y / FEDFUNDS / UNRATE / CPIAUCSL …）──
+// units: 可選 'lin'（原始）或 'pc1'（年增率%），預設 'lin'
+async function fetchFRED(seriesId, units = 'lin') {
   const apiKey = process.env.FRED_API_KEY;
   if (!apiKey) return null;
   try {
-    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=3`;
+    const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=3&units=${units}`;
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
@@ -106,29 +106,6 @@ async function fetchFRED(seriesId) {
     const obs = (data?.observations || []).find(o => o.value && o.value !== '.');
     return obs ? obs.value : null;
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
-}
-// ── Yahoo Finance quote API — ETF P/E（chart API 通常不返回 ETF trailingPE）──
-async function fetchETFPE(symbols) {
-  const result = {};
-  await Promise.all(symbols.map(async sym => {
-    for (const host of ['query1', 'query2']) {
-      try {
-        const url = `https://${host}.finance.yahoo.com/v10/finance/quoteSummary/${sym}?modules=summaryDetail`;
-        const r = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-          }
-        });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        const pe = data?.quoteSummary?.result?.[0]?.summaryDetail?.trailingPE?.raw;
-        if (pe) { result[sym] = pe; console.log(`ETF PE ${sym}=${pe}`); break; }
-      } catch(e) { console.log(`ETF PE ${sym} @${host} failed:`, e.message); }
-    }
-  }));
-  return result;
 }
 async function fetchTWSEMargin() {
   try {
@@ -175,71 +152,77 @@ function computeMonitorData(yf) {
   const twLong = Math.min(85, Math.max(30, Math.round(62 + twii.ch * 2)));
   const usLong = Math.min(85, Math.max(30, Math.round(55 + sp.ch * 3)));
 
-  // 美股機構資金流
-  const instAmt  = (sp.ch * 38 + 12).toFixed(0);
-  const hedgeAmt = (Math.abs(ixic.ch) * 15 + 5).toFixed(0);
-  const retailAmt= (Math.abs(nvda.ch) * 8 + 3).toFixed(0);
+  // 商品報價
+  const gold = yf['GC=F']?.price;
+  const oil  = yf['CL=F']?.price;
 
-  // 情緒探針
-  const retailConf = Math.max(20, Math.min(85, Math.round(50 + twii.ch * 4 - (vix - 15))));
-  const foreignDir = (twii.ch > 0 && usd < 32.5) ? '+' : '-';
-  const foreignAmt = foreignDir + (Math.abs(twii.ch) * 28 + 15).toFixed(0) + '億';
-
-  // P/E 計算（ETF 板塊：直接從 Yahoo Finance trailingPE 取得）
-  const spyPE  = yf['SPY']?.trailingPE?.toFixed(1) || '23.1';
-  const qqqPE  = yf['QQQ']?.trailingPE?.toFixed(1) || '36.4';
-  const xlkPE  = yf['XLK']?.trailingPE?.toFixed(1) || null;
-  const xlfPE  = yf['XLF']?.trailingPE?.toFixed(1) || null;
-  const xlePE  = yf['XLE']?.trailingPE?.toFixed(1) || null;
-
-  // 台積電 P/E（trailingPE 優先，其次 price/trailingEps）
-  const tsmcD  = yf['2330.TW'];
-  const tsmcPE = tsmcD?.trailingPE?.toFixed(1)
-    || (tsmcD?.price && tsmcD?.trailingEps && tsmcD.trailingEps > 0
-        ? (tsmcD.price / tsmcD.trailingEps).toFixed(1) : null);
-  // 元大50 P/E
-  const etf0050D  = yf['0050.TW'];
-  const etf0050PE = etf0050D?.trailingPE?.toFixed(1)
-    || (etf0050D?.price && etf0050D?.trailingEps && etf0050D.trailingEps > 0
-        ? (etf0050D.price / etf0050D.trailingEps).toFixed(1) : null);
-
-  // Short Interest（%數字，不帶單位，前端自行格式化）
-  const getShortNum = (sym, fb) => {
+  // Short Interest（只用 Yahoo Finance 回傳的真實數字，無靜態 fallback）
+  const getShortNum = sym => {
     const s = yf[sym]?.shortPercent;
-    return s ? (s * 100).toFixed(1) : fb;
+    return s ? (s * 100).toFixed(1) : null;
   };
 
   const fmt = (p, ch) => `${p.toLocaleString()} (${ch>=0?'+':''}${ch}%)`;
 
-  return [
+  const items = [
     // 指數報價
-    { title:'VIX 恐慌指數',      value: vix.toFixed(1) },
-    { title:'加權指數 TWII',      value: fmt(twii.price, twii.ch) },
-    { title:'那斯達克 IXIC',      value: fmt(ixic.price, ixic.ch) },
-    { title:'S&P500 GSPC',       value: fmt(sp.price, sp.ch) },
-    { title:'USD/TWD 匯率',      value: usd.toFixed(2) },
-    { title:'台積電 2330.TW',     value: fmt(tsmc.price, tsmc.ch) },
-    { title:'NVDA 輝達',         value: fmt(nvda.price, nvda.ch) },
-    { title:'AAPL 蘋果',         value: fmt(aapl.price, aapl.ch) },
-    { title:'TSLA 特斯拉',       value: fmt(tsla.price, tsla.ch) },
-    // 多空比（數字格式，前端直接 parseFloat）
-    { title:'台股多頭%',          value: String(twLong) },
-    { title:'美股多頭%',          value: String(usLong) },
-    // 本益比：ETF 板塊（XLK/XLF/XLE 從 Yahoo Finance trailingPE 取得）
-    { title:'S&P500 P/E (SPY)',   value: spyPE + 'x' },
-    { title:'那斯達克 P/E (QQQ)', value: qqqPE + 'x' },
-    ...(xlkPE ? [{ title:'科技 XLK P/E', value: xlkPE + 'x' }] : []),
-    ...(xlfPE ? [{ title:'金融 XLF P/E', value: xlfPE + 'x' }] : []),
-    ...(xlePE ? [{ title:'能源 XLE P/E', value: xlePE + 'x' }] : []),
-    ...(tsmcPE    ? [{ title:'台積電 2330 P/E',   value: tsmcPE    + 'x' }] : []),
-    ...(etf0050PE ? [{ title:'元大50 P/E (0050)', value: etf0050PE + 'x' }] : []),
-    // Short Interest（純數字，前端讀取後自行加 % 顯示）
-    { title:'NVDA 短空%',         value: getShortNum('NVDA', '2.1') },
-    { title:'TSLA 短空%',         value: getShortNum('TSLA', '8.4') },
-    { title:'SPY 短空%',          value: getShortNum('SPY',  '2.5') },
-    { title:'AAPL 短空%',         value: getShortNum('AAPL', '0.8') },
-    { title:'META 短空%',         value: getShortNum('META', '1.2') },
+    { title:'VIX 恐慌指數',  value: vix.toFixed(1) },
+    { title:'加權指數 TWII', value: fmt(twii.price, twii.ch) },
+    { title:'那斯達克 IXIC', value: fmt(ixic.price, ixic.ch) },
+    { title:'S&P500 GSPC',  value: fmt(sp.price, sp.ch) },
+    { title:'USD/TWD 匯率', value: usd.toFixed(2) },
+    { title:'台積電 2330.TW', value: fmt(tsmc.price, tsmc.ch) },
+    { title:'NVDA 輝達',    value: fmt(nvda.price, nvda.ch) },
+    { title:'AAPL 蘋果',    value: fmt(aapl.price, aapl.ch) },
+    { title:'TSLA 特斯拉',  value: fmt(tsla.price, tsla.ch) },
+    // 多空比（從 TWII/GSPC 漲跌幅推算，數字格式）
+    { title:'台股多頭%', value: String(twLong) },
+    { title:'美股多頭%', value: String(usLong) },
   ];
+
+  // 商品（有值才存）
+  if (gold) items.push({ title:'黃金 GC=F', value: gold.toFixed(1) });
+  if (oil)  items.push({ title:'原油 CL=F', value: oil.toFixed(2) });
+
+  // Short Interest（只用 YF 真實數值，無靜態 fallback）
+  for (const sym of ['NVDA','TSLA','SPY','AAPL','META']) {
+    const v = getShortNum(sym);
+    if (v) items.push({ title:`${sym} 短空%`, value: v });
+  }
+
+  return items;
+}
+
+// ── TWSE 大盤成交統計（上漲/下跌家數、成交量等市場廣度）──────
+async function fetchTWSEMarketBreadth() {
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    // MI_INDEX 回傳多筆指數，取大盤綜合（指數名稱含「加權」或第一筆）
+    const row = data.find(r =>
+      ['大盤','加權','TAIEX'].some(kw =>
+        Object.values(r).some(v => typeof v === 'string' && v.includes(kw))
+      )
+    ) || data[0];
+    console.log('TWSE MI_INDEX row0:', JSON.stringify(row));
+    const result = {};
+    const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return row[k]; } return null; };
+    const rising  = get('漲','上漲','上漲家數','RisingCount');
+    const falling = get('跌','下跌','下跌家數','FallingCount');
+    const limitUp = get('漲停','漲停家數','LimitUp');
+    const limitDn = get('跌停','跌停家數','LimitDown');
+    const turnover = get('成交金額','成交值','Turnover');
+    if (rising)   result['台股上漲家數'] = String(rising).replace(/,/g,'');
+    if (falling)  result['台股下跌家數'] = String(falling).replace(/,/g,'');
+    if (limitUp)  result['台股漲停家數'] = String(limitUp).replace(/,/g,'');
+    if (limitDn)  result['台股跌停家數'] = String(limitDn).replace(/,/g,'');
+    if (turnover) result['台股成交金額'] = String(turnover).replace(/,/g,'');
+    return Object.keys(result).length ? result : null;
+  } catch(e) { console.log('TWSE MI_INDEX failed:', e.message); return null; }
 }
 
 // ── TWSE 三大法人買賣超 ─────────────────────────────────────
@@ -437,15 +420,25 @@ async function runMarketAI(items, apiKey) {
   const twHeadlines = mkLines(twItems.length >= 2 ? twItems : items);
   const usHeadlines = mkLines(usItems.length >= 2 ? usItems : items);
 
-  const [twChip,usChip,twSent,usSent,twMargin,twLS] = await Promise.all([
-    callClaude('你是台股籌碼分析師。用繁體中文，根據今日新聞分析三大法人動向與台股籌碼面變化。100字以內。只回覆分析文字。',`今日台股新聞：\n${twHeadlines}`,apiKey,400),
-    callClaude('你是美股分析師。用繁體中文，根據今日新聞分析美股市場動態、資金流向、重點個股。100字以內。只回覆分析文字。',`今日美股新聞：\n${usHeadlines}`,apiKey,400),
-    callClaude('你是台股市場情緒分析師。用繁體中文，根據今日新聞判斷台股情緒（恐慌/偏空/中性/偏多/樂觀），含外資動向、大盤趨勢。80字以內。格式：「情緒：XX｜理由」。',`今日台股新聞：\n${twHeadlines}`,apiKey,300),
-    callClaude('你是美股市場情緒分析師。用繁體中文，根據今日新聞判斷美股情緒（恐慌/偏空/中性/偏多/樂觀），含VIX、Fed政策、地緣政治。80字以內。格式：「情緒：XX｜理由」。',`今日美股新聞：\n${usHeadlines}`,apiKey,300),
-    callClaude('你是台股融資分析師。用繁體中文，根據今日新聞分析台股融資餘額變化、融券動向與槓桿風險。80字以內。只回覆分析文字。',`今日台股新聞：\n${twHeadlines}`,apiKey,300),
-    callClaude('你是台股多空籌碼分析師。用繁體中文，根據今日新聞分析台股整體多空比例、主力籌碼動向與短線方向。80字以內。只回覆分析文字。',`今日台股新聞：\n${twHeadlines}`,apiKey,300),
+  const [twChip, usChip, twSent, usSent] = await Promise.all([
+    callClaude(
+      '你是台股籌碼整合分析師。用繁體中文，根據今日新聞對台股進行全面籌碼分析，涵蓋：①三大法人（外資、投信、自營商）動向 ②融資餘額與融券變化 ③整體多空比例與主力籌碼方向。150字以內。只回覆分析文字。',
+      `今日台股新聞：\n${twHeadlines}`, apiKey, 500
+    ),
+    callClaude(
+      '你是美股籌碼整合分析師。用繁體中文，根據今日新聞對美股進行全面籌碼分析，涵蓋：①機構資金流向（買超/賣超趨勢）②重要個股空頭部位變化 ③整體多空比例與市場情緒方向。150字以內。只回覆分析文字。',
+      `今日美股新聞：\n${usHeadlines}`, apiKey, 500
+    ),
+    callClaude(
+      '你是台股市場情緒分析師。用繁體中文，根據今日新聞判斷台股情緒（恐慌/偏空/中性/偏多/樂觀），含外資動向、大盤趨勢。80字以內。格式：「情緒：XX｜理由」。',
+      `今日台股新聞：\n${twHeadlines}`, apiKey, 300
+    ),
+    callClaude(
+      '你是美股市場情緒分析師。用繁體中文，根據今日新聞判斷美股情緒（恐慌/偏空/中性/偏多/樂觀），含VIX、Fed政策、地緣政治。80字以內。格式：「情緒：XX｜理由」。',
+      `今日美股新聞：\n${usHeadlines}`, apiKey, 300
+    ),
   ]);
-  return { twChip, usChip, twSent, usSent, twMargin, twLS };
+  return { twChip, usChip, twSent, usSent };
 }
 
 // ══════════════════════════════════════════════════════════
@@ -586,7 +579,7 @@ export default async function handler(req, res) {
     console.log('Cron: 開始...');
 
     // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE + 歷史價格 + FRED
-    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, etfPE] = await Promise.all([
+    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twseBreadth, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, fredUNRATE, fredCPI] = await Promise.all([
       fetchLatestNews(),
       fetchExistingEntries(dbId, notionKey),
       aiDbId ? fetchExistingAnalyses(aiDbId, notionKey) : Promise.resolve([]),
@@ -595,18 +588,15 @@ export default async function handler(req, res) {
       fetchTWSEInstitutional(),
       fetchTWSEStockChips(),
       fetchTWSEMargin(),
+      fetchTWSEMarketBreadth(),
       fetchYahooHistory('^TWII'),
       fetchYahooHistory('^GSPC'),
       fetchFRED('DGS10'),
       fetchFRED('T10Y2Y'),
       fetchFRED('FEDFUNDS'),
-      fetchETFPE(['XLK','XLF','XLE']),
+      fetchFRED('UNRATE'),
+      fetchFRED('CPIAUCSL', 'pc1'),
     ]);
-    // ETF PE 補充（chart API 通常不回傳 ETF trailingPE，改用 quote API 覆蓋）
-    for (const [sym, pe] of Object.entries(etfPE)) {
-      if (yfData[sym]) yfData[sym].trailingPE = pe;
-    }
-    if (Object.keys(etfPE).length) console.log(`Cron: ETF PE XLK=${etfPE.XLK} XLF=${etfPE.XLF} XLE=${etfPE.XLE}`);
     console.log(`Cron: RSS ${rssItems.length} / YF ${Object.keys(yfData).length} symbols`);
 
     // ② 新聞增量
@@ -635,12 +625,10 @@ export default async function handler(req, res) {
     const now = formatTW(new Date()).full;
     if (aiDbId) {
       const analyses = [
-        { title:'台股籌碼解讀', type:'台股籌碼', content:marketAI.twChip, source:`Claude Haiku｜Google News ${rssItems.length}則｜${now}` },
-        { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則｜${now}` },
+        { title:'台股籌碼解讀', type:'台股籌碼', content:marketAI.twChip, source:`Claude Haiku｜Google News ${rssItems.length}則（三大法人+融資融券+多空整合）｜${now}` },
+        { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則（機構資金+空頭+多空整合）｜${now}` },
         { title:'台股市場情緒', type:'台股市場情緒', content:marketAI.twSent, source:`Claude Haiku｜台股新聞→情緒判斷｜${now}` },
         { title:'美股市場情緒', type:'美股市場情緒', content:marketAI.usSent, source:`Claude Haiku｜美股新聞→情緒判斷｜${now}` },
-        { title:'台股融資解讀', type:'台股融資', content:marketAI.twMargin, source:`Claude Haiku｜台股新聞→融資分析｜${now}` },
-        { title:'台股多空解讀', type:'台股多空', content:marketAI.twLS, source:`Claude Haiku｜台股新聞→多空籌碼｜${now}` },
       ];
       for (const a of analyses) {
         if (a.content) {
@@ -699,6 +687,16 @@ export default async function handler(req, res) {
         console.log(`Cron: TWSE 融資融券 ${Object.keys(twseMargin).length} 筆`);
       }
 
+      // 合併 TWSE 大盤市場廣度（上漲/下跌家數、成交金額）
+      if (twseBreadth) {
+        for (const [title, value] of Object.entries(twseBreadth)) {
+          const existing = monitorData.find(i => i.title === title);
+          if (existing) existing.value = value;
+          else monitorData.push({ title, value });
+        }
+        console.log(`Cron: TWSE 市場廣度 ${Object.keys(twseBreadth).length} 筆`);
+      }
+
       // 合併情緒指標（MoodRing 算法，1年日線計算）
       const twSent = computeSentiment(twHistory);
       const usSent = computeSentiment(usHistory);
@@ -732,12 +730,14 @@ export default async function handler(req, res) {
         fredDGS10    ? { title:'10Y美債殖利率', value: parseFloat(fredDGS10).toFixed(2) + '%' }    : null,
         fredT10Y2Y   ? { title:'殖利率利差',    value: parseFloat(fredT10Y2Y).toFixed(2) + '%' }   : null,
         fredFEDFUNDS ? { title:'聯邦利率',      value: parseFloat(fredFEDFUNDS).toFixed(2) + '%' } : null,
+        fredUNRATE   ? { title:'美國失業率',     value: parseFloat(fredUNRATE).toFixed(1) + '%' }   : null,
+        fredCPI      ? { title:'美國CPI年增率',  value: parseFloat(fredCPI).toFixed(1) + '%' }      : null,
       ].filter(Boolean);
       for (const item of fredItems) {
         const ex = monitorData.find(i => i.title === item.title);
         if (ex) ex.value = item.value; else monitorData.push(item);
       }
-      if (fredItems.length) console.log(`Cron: FRED ${fredItems.length} 筆 (DGS10=${fredDGS10} T10Y2Y=${fredT10Y2Y} FF=${fredFEDFUNDS})`);
+      if (fredItems.length) console.log(`Cron: FRED ${fredItems.length} 筆 (DGS10=${fredDGS10} T10Y2Y=${fredT10Y2Y} FF=${fredFEDFUNDS} UNRATE=${fredUNRATE} CPI=${fredCPI})`);
 
       monitorResult = await updateMonitorDB(monitorData, monitorPages, monDbId, notionKey);
       console.log(`Cron: 數據監控更新 ${monitorResult.updated} 筆`);
