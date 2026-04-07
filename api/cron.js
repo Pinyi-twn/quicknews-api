@@ -244,6 +244,14 @@ function computeMonitorData(yf) {
 
 // ── TWSE 三大法人買賣超 ─────────────────────────────────────
 async function fetchTWSEInstitutional() {
+  // 嘗試方法1：TWSE OpenAPI
+  const r1 = await tryTWSEOpenAPI();
+  if (r1) return r1;
+  // 嘗試方法2：TWSE 主網站 JSON API
+  return await tryTWSEMainSite();
+}
+
+async function tryTWSEOpenAPI() {
   try {
     const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BFIAUU', {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
@@ -251,58 +259,72 @@ async function fetchTWSEInstitutional() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
+    console.log('TWSE OpenAPI[0]:', JSON.stringify(data[0]));
+    return parseTWSERows(data);
+  } catch(e) { console.log('TWSE OpenAPI failed:', e.message); return null; }
+}
 
-    // Debug log first row structure
-    console.log('TWSE BFIAUU[0]:', JSON.stringify(data[0]));
-
-    const find = (...keywords) => data.find(row =>
-      Object.values(row).some(v => typeof v === 'string' && keywords.some(kw => v.includes(kw)))
-    );
-
-    // 取買賣差額（千元）→ 億元：優先用 Diff 欄位，否則從 Buy-Sell 計算
+async function tryTWSEMainSite() {
+  try {
+    const r = await fetch('https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json&type=day', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
+    if (json.stat !== 'OK' || !Array.isArray(json.data) || !json.data.length) return null;
+    console.log('TWSE main site fields:', json.fields, 'row0:', json.data[0]);
+    // 格式：{ fields:['機構別','買進金額','賣出金額','買賣差額'], data:[['外資...',buy,sell,diff],...] }
+    const fields = json.fields || [];
+    const diffIdx = fields.findIndex(f => f.includes('差額') || f.includes('Diff'));
+    const nameIdx = 0;
+    if (diffIdx === -1) throw new Error('Diff field not found');
     const toYi = row => {
-      if (!row) return null;
-      // Try direct diff field (multiple possible names)
-      for (const k of ['Diff','diff','買賣差額(千元)','買賣差額','netBuySell','Net']) {
-        if (row[k] !== undefined) {
-          const n = parseFloat(String(row[k]).replace(/,/g,''));
-          if (!isNaN(n)) return +(n / 100000).toFixed(2);
-        }
-      }
-      // Fallback: compute Buy - Sell
-      const buyRaw  = row.Buy  ?? row['BuyAmt']  ?? row['買進金額(千元)'] ?? row['買進金額'];
-      const sellRaw = row.Sell ?? row['SellAmt'] ?? row['賣出金額(千元)'] ?? row['賣出金額'];
-      if (buyRaw != null && sellRaw != null) {
-        const buy  = parseFloat(String(buyRaw).replace(/,/g,''));
-        const sell = parseFloat(String(sellRaw).replace(/,/g,''));
-        if (!isNaN(buy) && !isNaN(sell)) return +((buy - sell) / 100000).toFixed(2);
-      }
-      return null;
+      const raw = row[diffIdx];
+      const n = parseFloat(String(raw).replace(/,/g, ''));
+      return isNaN(n) ? null : +(n / 100000).toFixed(2);
     };
-
-    const fmt = row => {
-      const v = toYi(row);
-      if (v === null) return null;
-      return (v >= 0 ? '+' : '') + v.toFixed(1) + '億';
-    };
-
-    const foreign = find('外資及陸資','外資','FINI','Foreign');
-    const trust   = find('投信','Trust');
-    const dealer  = find('自營商','Dealer','Proprietary');
-    const total   = find('三大法人','合計','Total');
-
+    const fmt = row => { const v = toYi(row); return v === null ? null : (v>=0?'+':'')+v.toFixed(1)+'億'; };
+    const find = (...kws) => json.data.find(row => kws.some(kw => String(row[nameIdx]).includes(kw)));
     const result = {};
-    const fF = fmt(foreign), fT = fmt(trust), fD = fmt(dealer), fTot = fmt(total);
+    const fF = fmt(find('外資及陸資','外資')), fT = fmt(find('投信')), fD = fmt(find('自營商')), fTot = fmt(find('三大法人','合計'));
     if (fF)   result['外資買賣超']   = fF;
     if (fT)   result['投信買賣超']   = fT;
     if (fD)   result['自營商買賣超'] = fD;
     if (fTot) result['三大法人合計'] = fTot;
-    console.log('TWSE institutional:', result);
+    console.log('TWSE main site result:', result);
     return Object.keys(result).length ? result : null;
-  } catch(e) {
-    console.log('TWSE institutional failed:', e.message);
+  } catch(e) { console.log('TWSE main site failed:', e.message); return null; }
+}
+
+function parseTWSERows(data) {
+  const find = (...kws) => data.find(row =>
+    Object.values(row).some(v => typeof v === 'string' && kws.some(kw => v.includes(kw)))
+  );
+  const toYi = row => {
+    if (!row) return null;
+    for (const k of ['Diff','diff','買賣差額(千元)','買賣差額','netBuySell','Net','差額']) {
+      if (row[k] !== undefined) {
+        const n = parseFloat(String(row[k]).replace(/,/g,''));
+        if (!isNaN(n)) return +(n/100000).toFixed(2);
+      }
+    }
+    const buyRaw  = row.Buy ?? row.BuyAmt ?? row['買進金額(千元)'] ?? row['買進金額'];
+    const sellRaw = row.Sell ?? row.SellAmt ?? row['賣出金額(千元)'] ?? row['賣出金額'];
+    if (buyRaw != null && sellRaw != null) {
+      const b = parseFloat(String(buyRaw).replace(/,/g,'')), s = parseFloat(String(sellRaw).replace(/,/g,''));
+      if (!isNaN(b) && !isNaN(s)) return +((b-s)/100000).toFixed(2);
+    }
     return null;
-  }
+  };
+  const fmt = row => { const v = toYi(row); return v===null?null:(v>=0?'+':'')+v.toFixed(1)+'億'; };
+  const result = {};
+  const fF = fmt(find('外資及陸資','外資','FINI')), fT = fmt(find('投信')), fD = fmt(find('自營商')), fTot = fmt(find('三大法人','合計'));
+  if (fF)   result['外資買賣超']   = fF;
+  if (fT)   result['投信買賣超']   = fT;
+  if (fD)   result['自營商買賣超'] = fD;
+  if (fTot) result['三大法人合計'] = fTot;
+  console.log('TWSE OpenAPI result:', result);
+  return Object.keys(result).length ? result : null;
 }
 
 // ── TWSE 個股外資買賣超 ─────────────────────────────────────
