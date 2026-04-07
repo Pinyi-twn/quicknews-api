@@ -194,35 +194,110 @@ function computeMonitorData(yf) {
 }
 
 // ── TWSE 大盤成交統計（上漲/下跌家數、成交量等市場廣度）──────
+// 嘗試順序：
+//   1. TWSE 主網站 MI_TWII（大盤成交統計，含上漲/下跌家數）
+//   2. TWSE 主網站 MI_INDEX（備援，含部份統計）
 async function fetchTWSEMarketBreadth() {
+  // 方法1：TWSE 主網站 rwd JSON — MI_TWII（大盤成交統計，有上漲/下跌家數）
+  try {
+    const r = await fetch('https://www.twse.com.tw/rwd/zh/afterTrading/MI_TWII?response=json', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
+    if (json.stat !== 'OK') throw new Error(`stat=${json.stat}`);
+    // 取最新一筆（data[0]）
+    const row = json.data?.[0];
+    const fields = json.fields || [];
+    console.log('TWSE MI_TWII fields:', fields, 'row0:', row);
+    if (!row || !fields.length) throw new Error('no data');
+    const idx = k => fields.findIndex(f => f.includes(k));
+    const get = (...kws) => {
+      for (const kw of kws) {
+        const i = idx(kw);
+        if (i >= 0 && row[i] != null && row[i] !== '') return String(row[i]).replace(/,/g, '');
+      }
+      return null;
+    };
+    const result = {};
+    const rising  = get('上漲','漲家數','上漲家數');
+    const falling = get('下跌','跌家數','下跌家數');
+    const limitUp = get('漲停');
+    const limitDn = get('跌停');
+    const turnover = get('成交金額','成交值','成交億元');
+    if (rising)  result['台股上漲家數'] = rising;
+    if (falling) result['台股下跌家數'] = falling;
+    if (limitUp) result['台股漲停家數'] = limitUp;
+    if (limitDn) result['台股跌停家數'] = limitDn;
+    if (turnover) result['台股成交金額'] = turnover;
+    if (Object.keys(result).length) {
+      console.log('TWSE MI_TWII result:', result);
+      return result;
+    }
+    throw new Error('no matching fields');
+  } catch(e) { console.log('TWSE MI_TWII failed:', e.message); }
+
+  // 方法2：TWSE OpenAPI MI_INDEX（備援）
   try {
     const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX', {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    if (!Array.isArray(data) || !data.length) return null;
-    // MI_INDEX 回傳多筆指數，取大盤綜合（指數名稱含「加權」或第一筆）
-    const row = data.find(r =>
-      ['大盤','加權','TAIEX'].some(kw =>
-        Object.values(r).some(v => typeof v === 'string' && v.includes(kw))
-      )
-    ) || data[0];
-    console.log('TWSE MI_INDEX row0:', JSON.stringify(row));
+    if (!Array.isArray(data) || !data.length) throw new Error('empty');
+    console.log('TWSE MI_INDEX keys:', Object.keys(data[0]));
+    // MI_INDEX 可能是個別指數列，也可能是帶有統計的總列
+    // 嘗試從所有列的所有值裡找數字型上漲/下跌欄位
     const result = {};
-    const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return row[k]; } return null; };
-    const rising  = get('漲','上漲','上漲家數','RisingCount');
-    const falling = get('跌','下跌','下跌家數','FallingCount');
-    const limitUp = get('漲停','漲停家數','LimitUp');
-    const limitDn = get('跌停','跌停家數','LimitDown');
-    const turnover = get('成交金額','成交值','Turnover');
-    if (rising)   result['台股上漲家數'] = String(rising).replace(/,/g,'');
-    if (falling)  result['台股下跌家數'] = String(falling).replace(/,/g,'');
-    if (limitUp)  result['台股漲停家數'] = String(limitUp).replace(/,/g,'');
-    if (limitDn)  result['台股跌停家數'] = String(limitDn).replace(/,/g,'');
-    if (turnover) result['台股成交金額'] = String(turnover).replace(/,/g,'');
-    return Object.keys(result).length ? result : null;
-  } catch(e) { console.log('TWSE MI_INDEX failed:', e.message); return null; }
+    for (const row of data) {
+      const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return row[k]; } return null; };
+      const rising  = get('漲家數','上漲家數','上漲','Risen');
+      const falling = get('跌家數','下跌家數','下跌','Fallen');
+      const limitUp = get('漲停家數','漲停');
+      const limitDn = get('跌停家數','跌停');
+      if (rising)  { result['台股上漲家數'] = String(rising).replace(/,/g,''); }
+      if (falling) { result['台股下跌家數'] = String(falling).replace(/,/g,''); }
+      if (limitUp) { result['台股漲停家數'] = String(limitUp).replace(/,/g,''); }
+      if (limitDn) { result['台股跌停家數'] = String(limitDn).replace(/,/g,''); }
+    }
+    if (Object.keys(result).length) return result;
+    throw new Error('no matching fields');
+  } catch(e) { console.log('TWSE MI_INDEX failed:', e.message); }
+
+  return null;
+}
+
+// ── TWSE 全市場殖利率（BWIBBU_ALL → 抓加權平均殖利率）─────────
+async function fetchTWSEMarketDividend() {
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    console.log('TWSE BWIBBU_ALL keys:', Object.keys(data[0]), 'row0:', JSON.stringify(data[0]));
+    // 計算全市場殖利率加權平均（取樣前200筆可交易股票）
+    const yields = data.slice(0, 200).map(row => {
+      const v = parseFloat(
+        row['殖利率(%)'] || row['殖利率'] || row['DividendYield'] || row['Yield'] || '0'
+      );
+      return isNaN(v) ? 0 : v;
+    }).filter(v => v > 0);
+    if (!yields.length) return null;
+    const avg = (yields.reduce((a, b) => a + b, 0) / yields.length).toFixed(2);
+    // 同時取台積電實際 P/E
+    const tsmcRow = data.find(row =>
+      ['2330'].some(c => Object.values(row).some(v => String(v).includes(c)))
+    );
+    const tsmcPE = tsmcRow
+      ? parseFloat(tsmcRow['本益比'] || tsmcRow['PE'] || tsmcRow['PERatio'] || '0') || null
+      : null;
+    return {
+      yield: avg + '%',
+      tsmcPE: tsmcPE ? tsmcPE.toFixed(1) + 'x' : null,
+    };
+  } catch(e) { console.log('TWSE BWIBBU_ALL failed:', e.message); return null; }
 }
 
 // ── TWSE 三大法人買賣超 ─────────────────────────────────────
@@ -488,16 +563,31 @@ async function archiveStaleEntries(pages, freshTitleSet, notionKey) {
 
 async function writeNewNews(items, dbId, notionKey) {
   const now = formatTW(new Date()).full;
-  await Promise.all(items.map(item=>fetch(`${NOTION_API}/pages`,{method:'POST',headers:notionHeaders(notionKey),body:JSON.stringify({
-    parent:{database_id:dbId},
-    properties:{
-      'Title':{title:[{text:{content:item.title}}]},'Body':{rich_text:[{text:{content:item.body||''}}]},'AI':{rich_text:[{text:{content:item.ai||''}}]},
-      'Tag':{select:{name:item.tag}},'TC':{rich_text:[{text:{content:item.tc}}]},'URL':{url:item.url||null},'Time':{rich_text:[{text:{content:item.t}}]},
-      'Active':{checkbox:true},'Pinned':{checkbox:false},
-      'Source':{rich_text:[{text:{content:`新聞：Google News RSS｜AI：Claude Haiku｜${now}`}}]},
-      'UpdatedAt':{rich_text:[{text:{content:now}}]},
-    }
-  })})));
+  // 由舊到新循序寫入（RSS index 0 = 最新），讓最新文章擁有最晚的 Notion created_time
+  // 如此 Notion 依 created_time 降冪排序後，最新新聞自然在最上方
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    await fetch(`${NOTION_API}/pages`, {
+      method: 'POST',
+      headers: notionHeaders(notionKey),
+      body: JSON.stringify({
+        parent: { database_id: dbId },
+        properties: {
+          'Title':     { title:     [{ text: { content: item.title } }] },
+          'Body':      { rich_text: [{ text: { content: item.body || '' } }] },
+          'AI':        { rich_text: [{ text: { content: item.ai || '' } }] },
+          'Tag':       { select:    { name: item.tag } },
+          'TC':        { rich_text: [{ text: { content: item.tc } }] },
+          'URL':       { url: item.url || null },
+          'Time':      { rich_text: [{ text: { content: item.t } }] },
+          'Active':    { checkbox: true },
+          'Pinned':    { checkbox: false },
+          'Source':    { rich_text: [{ text: { content: `新聞：Google News RSS｜AI：Claude Haiku｜${now}` } }] },
+          'UpdatedAt': { rich_text: [{ text: { content: now } }] },
+        }
+      })
+    });
+  }
 }
 
 async function upsertAnalysis(title, type, content, source, existingPages, aiDbId, notionKey) {
@@ -579,7 +669,7 @@ export default async function handler(req, res) {
     console.log('Cron: 開始...');
 
     // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE + 歷史價格 + FRED
-    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twseBreadth, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, fredUNRATE, fredCPI] = await Promise.all([
+    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twseBreadth, twseDividend, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, fredUNRATE, fredCPI] = await Promise.all([
       fetchLatestNews(),
       fetchExistingEntries(dbId, notionKey),
       aiDbId ? fetchExistingAnalyses(aiDbId, notionKey) : Promise.resolve([]),
@@ -589,6 +679,7 @@ export default async function handler(req, res) {
       fetchTWSEStockChips(),
       fetchTWSEMargin(),
       fetchTWSEMarketBreadth(),
+      fetchTWSEMarketDividend(),
       fetchYahooHistory('^TWII'),
       fetchYahooHistory('^GSPC'),
       fetchFRED('DGS10'),
@@ -695,6 +786,19 @@ export default async function handler(req, res) {
           else monitorData.push({ title, value });
         }
         console.log(`Cron: TWSE 市場廣度 ${Object.keys(twseBreadth).length} 筆`);
+      }
+
+      // 合併 TWSE 殖利率（BWIBBU_ALL）
+      if (twseDividend) {
+        if (twseDividend.yield) {
+          const ex = monitorData.find(i => i.title === '台股平均殖利率');
+          if (ex) ex.value = twseDividend.yield; else monitorData.push({ title:'台股平均殖利率', value: twseDividend.yield });
+        }
+        if (twseDividend.tsmcPE) {
+          const ex = monitorData.find(i => i.title === '台積電 P/E');
+          if (ex) ex.value = twseDividend.tsmcPE; else monitorData.push({ title:'台積電 P/E', value: twseDividend.tsmcPE });
+        }
+        console.log(`Cron: TWSE 殖利率=${twseDividend.yield} 台積電PE=${twseDividend.tsmcPE}`);
       }
 
       // 合併情緒指標（MoodRing 算法，1年日線計算）
