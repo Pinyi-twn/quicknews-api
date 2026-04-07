@@ -305,8 +305,12 @@ function parseTWSERows(data) {
     for (const k of ['Diff','diff','買賣差額(千元)','買賣差額','netBuySell','Net','差額']) {
       if (row[k] !== undefined) {
         const n = parseFloat(String(row[k]).replace(/,/g,''));
-        if (!isNaN(n)) return +(n/100000).toFixed(2);
-      }
+         if (isNaN(n)) return null;
+        // 自動偵測單位：若除以 100000 結果 > 5000億，代表原始值為元，改除以 1 億
+        let yi = n / 100000;
+        if (Math.abs(yi) > 5000) yi = n / 100000000;
+        return +yi.toFixed(2);
+    }
     }
     const buyRaw  = row.Buy ?? row.BuyAmt ?? row['買進金額(千元)'] ?? row['買進金額'];
     const sellRaw = row.Sell ?? row.SellAmt ?? row['賣出金額(千元)'] ?? row['賣出金額'];
