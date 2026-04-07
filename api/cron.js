@@ -193,64 +193,31 @@ function computeMonitorData(yf) {
   return items;
 }
 
-// ── TWSE 大盤成交統計（上漲/下跌家數、成交量等市場廣度）──────
-// 嘗試順序：
-//   1. TWSE OpenAPI MI_INDEX（大盤各指數統計，含漲跌家數）
-//   2. TWSE 主網站 rwd MI_TWII（每日成交量統計，含漲跌家數）
-//   3. TWSE 主網站 rwd MI_INDEX（備援）
+// ── TWSE 大盤成交統計（上漲/下跌家數）──────────────────────────
+// MI_TWII 是唯一有漲跌家數的端點（afterTrading，每日收盤後有效）
+// MI_INDEX (OpenAPI) 只有指數報價，沒有漲跌家數 — 不使用
 async function fetchTWSEMarketBreadth() {
-  // 方法1：TWSE OpenAPI MI_INDEX — 大盤各指數行情，含漲跌家數
-  try {
-    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX', {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (!Array.isArray(data) || !data.length) throw new Error('empty');
-    console.log('TWSE MI_INDEX[0] keys:', Object.keys(data[0]), 'row:', JSON.stringify(data[0]));
-    const result = {};
-    for (const row of data) {
-      const allKeys = Object.keys(row);
-      const getVal = (...keys) => {
-        for (const k of keys) {
-          // exact match first
-          if (row[k] !== undefined && row[k] !== '') return String(row[k]).replace(/,/g,'');
-          // partial key match
-          const found = allKeys.find(ak => ak.includes(k));
-          if (found && row[found] !== undefined && row[found] !== '') return String(row[found]).replace(/,/g,'');
-        }
-        return null;
-      };
-      const rising  = getVal('上漲','漲家','Risen','漲家數');
-      const falling = getVal('下跌','跌家','Fallen','跌家數');
-      const limitUp = getVal('漲停','LimitUp');
-      const limitDn = getVal('跌停','LimitDown');
-      // Only pick row that actually has breadth data (not all rows will)
-      if (rising && !result['台股上漲家數'])  result['台股上漲家數'] = rising;
-      if (falling && !result['台股下跌家數']) result['台股下跌家數'] = falling;
-      if (limitUp && !result['台股漲停家數']) result['台股漲停家數'] = limitUp;
-      if (limitDn && !result['台股跌停家數']) result['台股跌停家數'] = limitDn;
-    }
-    if (result['台股上漲家數'] || result['台股下跌家數']) {
-      console.log('TWSE MI_INDEX breadth result:', result);
-      return result;
-    }
-    throw new Error('no breadth fields found in MI_INDEX');
-  } catch(e) { console.log('TWSE OpenAPI MI_INDEX failed:', e.message); }
-
-  // 方法2：TWSE 主網站 MI_TWII（大盤日成交統計，有上漲/下跌家數）
+  // TWSE 主網站 rwd JSON — MI_TWII（大盤成交統計，含上漲/下跌家數）
+  // 注意：stat 可能不是 'OK'（例如休市時），但只要 fields/data 有值就取用
   try {
     const r = await fetch('https://www.twse.com.tw/rwd/zh/afterTrading/MI_TWII?response=json', {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120',
+        'Referer': 'https://www.twse.com.tw/',
+      }
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const json = await r.json();
-    console.log('TWSE MI_TWII stat:', json.stat, 'fields:', json.fields, 'data[0]:', json.data?.[0]);
-    // Accept both 'OK' and other non-error states; just need fields+data
-    const row = json.data?.[0];
+    console.log('TWSE MI_TWII stat:', json.stat, 'fields:', JSON.stringify(json.fields), 'data[0]:', JSON.stringify(json.data?.[0]));
+    // 取最新一筆（data[0]）— 不強制 stat==='OK'，有 data 就算
+    const row    = json.data?.[0];
     const fields = json.fields || [];
-    if (!row || !fields.length) throw new Error(`no data (stat=${json.stat})`);
-    const idx = k => fields.findIndex(f => f.includes(k));
+    if (!row || !fields.length) {
+      console.log('TWSE MI_TWII: no fields/data, stat=', json.stat);
+      return null;
+    }
+    const idx = k => fields.findIndex(f => String(f).includes(k));
     const get = (...kws) => {
       for (const kw of kws) {
         const i = idx(kw);
@@ -263,20 +230,23 @@ async function fetchTWSEMarketBreadth() {
     const falling = get('下跌','跌家');
     const limitUp = get('漲停');
     const limitDn = get('跌停');
-    const turnover = get('成交金額','成交值');
-    if (rising)  result['台股上漲家數'] = rising;
-    if (falling) result['台股下跌家數'] = falling;
-    if (limitUp) result['台股漲停家數'] = limitUp;
-    if (limitDn) result['台股跌停家數'] = limitDn;
+    const turnover = get('成交金額','成交值','億元');
+    if (rising)   result['台股上漲家數'] = rising;
+    if (falling)  result['台股下跌家數'] = falling;
+    if (limitUp)  result['台股漲停家數'] = limitUp;
+    if (limitDn)  result['台股跌停家數'] = limitDn;
     if (turnover) result['台股成交金額'] = turnover;
-    if (result['台股上漲家數'] || result['台股下跌家數']) {
-      console.log('TWSE MI_TWII result:', result);
+    if (Object.keys(result).length) {
+      console.log('TWSE MI_TWII breadth:', JSON.stringify(result));
       return result;
     }
-    throw new Error('no matching fields in MI_TWII');
-  } catch(e) { console.log('TWSE MI_TWII failed:', e.message); }
-
-  return null;
+    // fields 存在但找不到對應欄位 — log fields 方便排查
+    console.log('TWSE MI_TWII fields found but no breadth match. fields=', JSON.stringify(fields));
+    return null;
+  } catch(e) {
+    console.log('TWSE MI_TWII failed:', e.message);
+    return null;
+  }
 }
 
 // ── TWSE 全市場殖利率（BWIBBU_ALL → 抓加權平均殖利率）─────────
@@ -518,7 +488,10 @@ async function runMarketAI(items, apiKey) {
   const twHeadlines = mkLines(twItems.length >= 2 ? twItems : items);
   const usHeadlines = mkLines(usItems.length >= 2 ? usItems : items);
 
-  const [twChip, usChip, twSent, usSent] = await Promise.all([
+  const allHeadlines = mkLines(items);
+
+  const [twChip, usChip, twSent, usSent, newsSummary] = await Promise.all([
+    // 籌碼頁面：深入的資金流向分析（專注籌碼面）
     callClaude(
       '你是台股籌碼整合分析師。用繁體中文，根據今日新聞對台股進行全面籌碼分析，涵蓋：①三大法人（外資、投信、自營商）動向 ②融資餘額與融券變化 ③整體多空比例與主力籌碼方向。150字以內。只回覆分析文字。',
       `今日台股新聞：\n${twHeadlines}`, apiKey, 500
@@ -527,6 +500,7 @@ async function runMarketAI(items, apiKey) {
       '你是美股籌碼整合分析師。用繁體中文，根據今日新聞對美股進行全面籌碼分析，涵蓋：①機構資金流向（買超/賣超趨勢）②重要個股空頭部位變化 ③整體多空比例與市場情緒方向。150字以內。只回覆分析文字。',
       `今日美股新聞：\n${usHeadlines}`, apiKey, 500
     ),
+    // 市場情緒頁面：情緒判斷（簡短格式，用於恐懼貪婪指數旁）
     callClaude(
       '你是台股市場情緒分析師。用繁體中文，根據今日新聞判斷台股情緒（恐慌/偏空/中性/偏多/樂觀），含外資動向、大盤趨勢。80字以內。格式：「情緒：XX｜理由」。',
       `今日台股新聞：\n${twHeadlines}`, apiKey, 300
@@ -535,8 +509,13 @@ async function runMarketAI(items, apiKey) {
       '你是美股市場情緒分析師。用繁體中文，根據今日新聞判斷美股情緒（恐慌/偏空/中性/偏多/樂觀），含VIX、Fed政策、地緣政治。80字以內。格式：「情緒：XX｜理由」。',
       `今日美股新聞：\n${usHeadlines}`, apiKey, 300
     ),
+    // 快報頁面摘要：綜合所有新聞，給出今日重點提醒（與情緒頁不同，著重新聞事件本身）
+    callClaude(
+      '你是速懶報財經編輯。用繁體中文，將今日所有新聞整合為一段市場快報摘要，點出最重要的2-3個事件與對投資人的啟示。120字以內。語氣簡潔有力，像廣播新聞開頭。只回覆摘要文字。',
+      `今日所有快報：\n${allHeadlines}`, apiKey, 400
+    ),
   ]);
-  return { twChip, usChip, twSent, usSent };
+  return { twChip, usChip, twSent, usSent, newsSummary };
 }
 
 // ══════════════════════════════════════════════════════════
@@ -628,43 +607,59 @@ async function upsertAnalysis(title, type, content, source, existingPages, aiDbI
 // ── 更新數據監控 ────────────────────────────────────────
 async function updateMonitorDB(monitorData, monitorPages, monDbId, notionKey) {
   const now = formatTW(new Date()).full;
-  let updated = 0, skipped = 0;
+  let updated = 0, failed = 0;
 
   for (const item of monitorData) {
-    const existing = monitorPages.find(p =>
-      (p.properties?.Title?.title?.[0]?.text?.content || '') === item.title
-    );
-    if (!existing) {
-      // 自動建立缺少的列（新功能鍵首次執行時）
-      await fetch(`${NOTION_API}/pages`, {
-        method: 'POST',
+    try {
+      const existing = monitorPages.find(p =>
+        (p.properties?.Title?.title?.[0]?.text?.content || '') === item.title
+      );
+      // 確保 value 是字串
+      const valStr = String(item.value ?? '');
+
+      if (!existing) {
+        const res = await fetch(`${NOTION_API}/pages`, {
+          method: 'POST',
+          headers: notionHeaders(notionKey),
+          body: JSON.stringify({
+            parent: { database_id: monDbId },
+            properties: {
+              'Title':     { title:     [{ text: { content: item.title } }] },
+              'Value':     { rich_text: [{ text: { content: valStr } }] },
+              'UpdatedAt': { rich_text: [{ text: { content: now } }] },
+            }
+          })
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          console.log(`Monitor CREATE failed [${item.title}]: ${res.status} ${err}`);
+          failed++;
+        } else { updated++; }
+        continue;
+      }
+
+      const res = await fetch(`${NOTION_API}/pages/${existing.id}`, {
+        method: 'PATCH',
         headers: notionHeaders(notionKey),
         body: JSON.stringify({
-          parent: { database_id: monDbId },
           properties: {
-            'Title':     { title: [{ text: { content: item.title } }] },
-            'Value':     { rich_text: [{ text: { content: item.value } }] },
+            'Value':     { rich_text: [{ text: { content: valStr } }] },
             'UpdatedAt': { rich_text: [{ text: { content: now } }] },
           }
         })
       });
-      updated++;
-      continue;
+      if (!res.ok) {
+        const err = await res.text();
+        console.log(`Monitor PATCH failed [${item.title}]: ${res.status} ${err}`);
+        failed++;
+      } else { updated++; }
+    } catch(e) {
+      console.log(`Monitor error [${item.title}]:`, e.message);
+      failed++;
     }
-
-    await fetch(`${NOTION_API}/pages/${existing.id}`, {
-      method: 'PATCH',
-      headers: notionHeaders(notionKey),
-      body: JSON.stringify({
-        properties: {
-          'Value':     { rich_text: [{ text: { content: item.value } }] },
-          'UpdatedAt': { rich_text: [{ text: { content: now } }] },
-        }
-      })
-    });
-    updated++;
   }
-  return { updated, skipped };
+  console.log(`updateMonitorDB: ${updated} updated, ${failed} failed`);
+  return { updated, failed };
 }
 
 // ══════════════════════════════════════════════════════════
@@ -718,7 +713,7 @@ export default async function handler(req, res) {
 
     // ③ AI 解析
     let aiTexts = [];
-    let marketAI = { twChip:'', usChip:'', twSent:'', usSent:'', twMargin:'', twLS:'' };
+    let marketAI = { twChip:'', usChip:'', twSent:'', usSent:'', newsSummary:'' };
     if (anthropicKey) {
       const tasks = [];
       if (newItems.length > 0) tasks.push(runNewsAI(newItems, anthropicKey).then(r=>{aiTexts=r;}));
@@ -743,6 +738,8 @@ export default async function handler(req, res) {
         { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則（機構資金+空頭+多空整合）｜${now}` },
         { title:'台股市場情緒', type:'台股市場情緒', content:marketAI.twSent, source:`Claude Haiku｜台股新聞→情緒判斷｜${now}` },
         { title:'美股市場情緒', type:'美股市場情緒', content:marketAI.usSent, source:`Claude Haiku｜美股新聞→情緒判斷｜${now}` },
+        // 快報頁面專用：綜合新聞摘要（與情緒判斷不同，著重事件本身）
+        { title:'新聞摘要', type:'新聞摘要', content:marketAI.newsSummary, source:`Claude Haiku｜Google News ${rssItems.length}則（綜合快報摘要）｜${now}` },
       ];
       for (const a of analyses) {
         if (a.content) {
