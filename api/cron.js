@@ -195,22 +195,61 @@ function computeMonitorData(yf) {
 
 // ── TWSE 大盤成交統計（上漲/下跌家數、成交量等市場廣度）──────
 // 嘗試順序：
-//   1. TWSE 主網站 MI_TWII（大盤成交統計，含上漲/下跌家數）
-//   2. TWSE 主網站 MI_INDEX（備援，含部份統計）
+//   1. TWSE OpenAPI MI_INDEX（大盤各指數統計，含漲跌家數）
+//   2. TWSE 主網站 rwd MI_TWII（每日成交量統計，含漲跌家數）
+//   3. TWSE 主網站 rwd MI_INDEX（備援）
 async function fetchTWSEMarketBreadth() {
-  // 方法1：TWSE 主網站 rwd JSON — MI_TWII（大盤成交統計，有上漲/下跌家數）
+  // 方法1：TWSE OpenAPI MI_INDEX — 大盤各指數行情，含漲跌家數
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) throw new Error('empty');
+    console.log('TWSE MI_INDEX[0] keys:', Object.keys(data[0]), 'row:', JSON.stringify(data[0]));
+    const result = {};
+    for (const row of data) {
+      const allKeys = Object.keys(row);
+      const getVal = (...keys) => {
+        for (const k of keys) {
+          // exact match first
+          if (row[k] !== undefined && row[k] !== '') return String(row[k]).replace(/,/g,'');
+          // partial key match
+          const found = allKeys.find(ak => ak.includes(k));
+          if (found && row[found] !== undefined && row[found] !== '') return String(row[found]).replace(/,/g,'');
+        }
+        return null;
+      };
+      const rising  = getVal('上漲','漲家','Risen','漲家數');
+      const falling = getVal('下跌','跌家','Fallen','跌家數');
+      const limitUp = getVal('漲停','LimitUp');
+      const limitDn = getVal('跌停','LimitDown');
+      // Only pick row that actually has breadth data (not all rows will)
+      if (rising && !result['台股上漲家數'])  result['台股上漲家數'] = rising;
+      if (falling && !result['台股下跌家數']) result['台股下跌家數'] = falling;
+      if (limitUp && !result['台股漲停家數']) result['台股漲停家數'] = limitUp;
+      if (limitDn && !result['台股跌停家數']) result['台股跌停家數'] = limitDn;
+    }
+    if (result['台股上漲家數'] || result['台股下跌家數']) {
+      console.log('TWSE MI_INDEX breadth result:', result);
+      return result;
+    }
+    throw new Error('no breadth fields found in MI_INDEX');
+  } catch(e) { console.log('TWSE OpenAPI MI_INDEX failed:', e.message); }
+
+  // 方法2：TWSE 主網站 MI_TWII（大盤日成交統計，有上漲/下跌家數）
   try {
     const r = await fetch('https://www.twse.com.tw/rwd/zh/afterTrading/MI_TWII?response=json', {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const json = await r.json();
-    if (json.stat !== 'OK') throw new Error(`stat=${json.stat}`);
-    // 取最新一筆（data[0]）
+    console.log('TWSE MI_TWII stat:', json.stat, 'fields:', json.fields, 'data[0]:', json.data?.[0]);
+    // Accept both 'OK' and other non-error states; just need fields+data
     const row = json.data?.[0];
     const fields = json.fields || [];
-    console.log('TWSE MI_TWII fields:', fields, 'row0:', row);
-    if (!row || !fields.length) throw new Error('no data');
+    if (!row || !fields.length) throw new Error(`no data (stat=${json.stat})`);
     const idx = k => fields.findIndex(f => f.includes(k));
     const get = (...kws) => {
       for (const kw of kws) {
@@ -220,49 +259,22 @@ async function fetchTWSEMarketBreadth() {
       return null;
     };
     const result = {};
-    const rising  = get('上漲','漲家數','上漲家數');
-    const falling = get('下跌','跌家數','下跌家數');
+    const rising  = get('上漲','漲家');
+    const falling = get('下跌','跌家');
     const limitUp = get('漲停');
     const limitDn = get('跌停');
-    const turnover = get('成交金額','成交值','成交億元');
+    const turnover = get('成交金額','成交值');
     if (rising)  result['台股上漲家數'] = rising;
     if (falling) result['台股下跌家數'] = falling;
     if (limitUp) result['台股漲停家數'] = limitUp;
     if (limitDn) result['台股跌停家數'] = limitDn;
     if (turnover) result['台股成交金額'] = turnover;
-    if (Object.keys(result).length) {
+    if (result['台股上漲家數'] || result['台股下跌家數']) {
       console.log('TWSE MI_TWII result:', result);
       return result;
     }
-    throw new Error('no matching fields');
+    throw new Error('no matching fields in MI_TWII');
   } catch(e) { console.log('TWSE MI_TWII failed:', e.message); }
-
-  // 方法2：TWSE OpenAPI MI_INDEX（備援）
-  try {
-    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX', {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (!Array.isArray(data) || !data.length) throw new Error('empty');
-    console.log('TWSE MI_INDEX keys:', Object.keys(data[0]));
-    // MI_INDEX 可能是個別指數列，也可能是帶有統計的總列
-    // 嘗試從所有列的所有值裡找數字型上漲/下跌欄位
-    const result = {};
-    for (const row of data) {
-      const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return row[k]; } return null; };
-      const rising  = get('漲家數','上漲家數','上漲','Risen');
-      const falling = get('跌家數','下跌家數','下跌','Fallen');
-      const limitUp = get('漲停家數','漲停');
-      const limitDn = get('跌停家數','跌停');
-      if (rising)  { result['台股上漲家數'] = String(rising).replace(/,/g,''); }
-      if (falling) { result['台股下跌家數'] = String(falling).replace(/,/g,''); }
-      if (limitUp) { result['台股漲停家數'] = String(limitUp).replace(/,/g,''); }
-      if (limitDn) { result['台股跌停家數'] = String(limitDn).replace(/,/g,''); }
-    }
-    if (Object.keys(result).length) return result;
-    throw new Error('no matching fields');
-  } catch(e) { console.log('TWSE MI_INDEX failed:', e.message); }
 
   return null;
 }
@@ -287,12 +299,23 @@ async function fetchTWSEMarketDividend() {
     if (!yields.length) return null;
     const avg = (yields.reduce((a, b) => a + b, 0) / yields.length).toFixed(2);
     // 同時取台積電實際 P/E
-    const tsmcRow = data.find(row =>
-      ['2330'].some(c => Object.values(row).some(v => String(v).includes(c)))
+    // Find TSMC row by stock code 2330
+    const tsmcRow = data.find(row => {
+      const vals = Object.values(row).map(v => String(v));
+      return vals.includes('2330') || vals.some(v => v === '2330');
+    }) || data.find(row =>
+      Object.values(row).some(v => String(v).includes('2330'))
     );
-    const tsmcPE = tsmcRow
-      ? parseFloat(tsmcRow['本益比'] || tsmcRow['PE'] || tsmcRow['PERatio'] || '0') || null
-      : null;
+    if (tsmcRow) console.log('TSMC row keys:', Object.keys(tsmcRow), 'values:', JSON.stringify(tsmcRow));
+    // P/E field may be '本益比(倍)', '本益比', 'PERatio', 'PE', etc.
+    const getPE = row => {
+      if (!row) return null;
+      const keys = Object.keys(row);
+      const peKey = keys.find(k => k.includes('本益比') || k.includes('PE') || k === 'PERatio');
+      if (peKey) return parseFloat(String(row[peKey]).replace(/,/g,'')) || null;
+      return null;
+    };
+    const tsmcPE = getPE(tsmcRow);
     return {
       yield: avg + '%',
       tsmcPE: tsmcPE ? tsmcPE.toFixed(1) + 'x' : null,
