@@ -671,25 +671,24 @@ export default async function handler(req, res) {
           if (existing) existing.value = value;
           else monitorData.push({ title, value });
         }
-        // 滾動更新外資近10日買賣超（comma-separated）
-        if (twseInst?.['外資買賣超']) {
-          const todayNum = parseFloat(twseInst['外資買賣超'].replace(/[^0-9.-]/g, ''));
-          if (!isNaN(todayNum)) {
-            const flowRow = monitorPages.find(p =>
-              (p.properties?.Title?.title?.[0]?.text?.content || '') === '外資近10日買賣超'
-            );
-            const oldVal = flowRow?.properties?.Value?.rich_text?.[0]?.text?.content || '';
-            const vals = oldVal.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
-            vals.push(todayNum);
-            const last10 = vals.slice(-10).join(',');
-            const flowItem = monitorData.find(i => i.title === '外資近10日買賣超');
-            if (flowItem) flowItem.value = last10;
-            else monitorData.push({ title:'外資近10日買賣超', value: last10 });
-          }
-        }
         console.log(`Cron: TWSE 個股籌碼 ${Object.keys(twseChips).length} 筆`);
       }
-
+      // 滾動更新外資近10日買賣超（獨立於 twseChips，只需 twseInst 成功即可）
+      if (twseInst?.['外資買賣超']) {
+        const todayNum = parseFloat(twseInst['外資買賣超'].replace(/[^0-9.-]/g, ''));
+        if (!isNaN(todayNum)) {
+          const flowRow = monitorPages.find(p =>
+            (p.properties?.Title?.title?.[0]?.text?.content || '') === '外資近10日買賣超'
+          );
+          const oldVal = flowRow?.properties?.Value?.rich_text?.[0]?.text?.content || '';
+          const vals = oldVal.split(',').map(v => parseFloat(v.trim())).filter(v => !isNaN(v));
+          vals.push(todayNum);
+          const last10 = vals.slice(-10).join(',');
+          const flowItem = monitorData.find(i => i.title === '外資近10日買賣超');
+          if (flowItem) flowItem.value = last10;
+          else monitorData.push({ title:'外資近10日買賣超', value: last10 });
+        }
+      }
       // 合併 TWSE 融資融券
       if (twseMargin) {
         for (const [title, value] of Object.entries(twseMargin)) {
