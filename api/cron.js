@@ -437,13 +437,14 @@ async function fetchTWSEStockChips() {
 // ══════════════════════════════════════════════════════════
 
 async function fetchLatestNews() {
-  const RSS_URL = 'https://news.google.com/rss/search?q=%E5%8F%B0%E7%A9%8D%E9%9B%BB+OR+%E5%8F%B0%E8%82%A1+OR+%E8%81%AF%E7%99%BC%E7%A7%91+OR+%E7%BE%8E%E8%82%A1+OR+Fed&hl=zh-TW&gl=TW&ceid=TW:zh-Hant';
+  // 抓更多候選（30 則），後續由 AI 篩選最佳 8 則
+  const RSS_URL = 'https://news.google.com/rss/search?q=%E5%8F%B0%E8%82%A1+OR+%E5%8F%B0%E7%A9%8D%E9%9B%BB+OR+%E8%81%AF%E7%99%BC%E7%A7%91+OR+%E7%BE%8E%E8%82%A1+OR+Fed+OR+%E9%99%8D%E6%81%AF+OR+%E9%96%8B%E7%9B%A4+OR+%E5%A4%96%E8%B3%87&hl=zh-TW&gl=TW&ceid=TW:zh-Hant';
   const r = await fetch(RSS_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } });
   const xml = await r.text();
   const items = [];
   const re = /<item>([\s\S]*?)<\/item>/g;
   let m;
-  while ((m = re.exec(xml)) !== null && items.length < 8) {
+  while ((m = re.exec(xml)) !== null && items.length < 30) {
     const b = m[1];
     const clean = s => (s||'').replace(/<!\\[CDATA\\[(.*?)\\]\\]>/gs,'$1').replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi,'').replace(/<[^>]+>/g,'').replace(/&lt;.*?&gt;/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
     const title = clean((b.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/)||b.match(/<title>(.*?)<\/title>/))?.[1]||'').replace(/ - [^-]+$/,'').trim();
@@ -454,13 +455,69 @@ async function fetchLatestNews() {
     const d = pub ? new Date(pub) : new Date();
     const t = isNaN(d) ? formatTW(new Date()).date : formatTW(d).date;
     let tag='財經', tc='b-macro';
-    if (/台積電|半導體|晶片|CoWoS|輝達|NVDA|AI/i.test(title))    { tag='半導體'; tc='b-semi'; }
-    else if (/Fed|聯準會|利率|通膨|降息|升息|美元/i.test(title))   { tag='總經';   tc='b-macro'; }
-    else if (/法說|財報|EPS|獲利|營收/i.test(title))               { tag='財報';   tc='b-report'; }
-    else if (/美股|S&P|那斯達克|TSLA|AAPL|Meta/i.test(title))     { tag='美股';   tc='b-us'; }
-    items.push({ title, body:desc, tag, tc, url:link, t, pubDate:pub });
+    if (/台積電|半導體|晶片|CoWoS|HBM|封測|輝達|NVDA/i.test(title))  { tag='半導體'; tc='b-semi'; }
+    else if (/Fed|聯準會|利率|通膨|降息|升息|美元|關稅|貿易戰/i.test(title)) { tag='總經'; tc='b-macro'; }
+    else if (/法說|財報|EPS|獲利|營收|配息|股利/i.test(title))          { tag='財報';   tc='b-report'; }
+    else if (/美股|S&P|那斯達克|道瓊|TSLA|AAPL|Meta|Google|標普/i.test(title)) { tag='美股'; tc='b-us'; }
+    else if (/加權|大盤|外資|投信|自營|法人|台幣|開盤|收盤/i.test(title)) { tag='大盤'; tc='b-macro'; }
+    items.push({ title, body:desc, tag, tc, url:link, t, pubDate:pub, pubMs: isNaN(d) ? 0 : d.getTime() });
   }
   return items;
+}
+
+// AI 篩選：從候選池挑出最佳 8 則（半導體最多 2，其他最多 3，台美股都要有）
+async function selectNewsByAI(items, apiKey) {
+  if (!items.length) return [];
+  const headlines = items.map((n,i) => `${i+1}. [${n.tag}] ${n.title}`).join('\n');
+  const prompt = `你是速懶報財經編輯。從下列候選新聞中，選出今日快報最重要的 8 則。
+
+篩選規則：
+1. 「半導體」類別最多 2 則；若有多則台積電新聞，只保留最重要 1 則
+2. 其他類別（總經、美股、財報、大盤、財經）各最多 3 則
+3. 台股與美股都要包含（各至少 1 則）
+4. 大盤、總經、重要指標優先
+5. 排除重複或高度相似的事件
+
+候選新聞（共 ${items.length} 則）：
+${headlines}
+
+請只回覆 JSON 陣列，含選出的編號（1-based），由重要到次要。例：[3,1,7,2,5,8,4,6]`;
+
+  try {
+    const text = await callClaude('你是速懶報財經編輯，負責篩選每日快報新聞。', prompt, apiKey, 200);
+    const indices = JSON.parse(text.replace(/```json|```/g,'').trim());
+    if (!Array.isArray(indices) || !indices.length) throw new Error('empty');
+    const selected = indices.slice(0,8).map(i => items[i-1]).filter(Boolean);
+    console.log(`[selectNewsByAI] AI 選出 ${selected.length} 則:`, selected.map(n=>`[${n.tag}]${n.title.slice(0,20)}`).join(' / '));
+    return selected;
+  } catch(e) {
+    console.error('[selectNewsByAI] fallback:', e.message);
+    return applySimpleSelection(items);
+  }
+}
+
+// 無 AI 時的規則篩選（fallback）
+function applySimpleSelection(items) {
+  const CAT_MAX = { '半導體': 2 };
+  const DEFAULT_MAX = 3;
+  const catCount = {};
+  const seen = new Set();
+  const selected = [];
+
+  // 先保證各類別基本代表性，再補滿
+  for (const item of items) {
+    if (selected.length >= 8) break;
+    const cat = item.tag;
+    const limit = CAT_MAX[cat] ?? DEFAULT_MAX;
+    if ((catCount[cat] || 0) >= limit) continue;
+    // 簡易去重：前 15 字相似視為重複
+    const key = item.title.slice(0, 15);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    catCount[cat] = (catCount[cat] || 0) + 1;
+    selected.push(item);
+  }
+  return selected;
 }
 
 async function callClaude(system, userMsg, apiKey, maxTokens=1200) {
@@ -719,24 +776,34 @@ export default async function handler(req, res) {
       fetchFRED('UNRATE'),
       fetchFRED('CPIAUCSL', 'pc1'),
     ]);
-    console.log(`Cron: RSS ${rssItems.length} / YF ${Object.keys(yfData).length} symbols`);
+    console.log(`Cron: RSS ${rssItems.length} 則候選 / YF ${Object.keys(yfData).length} symbols`);
 
-    // ② 新聞增量
-    const newItems = rssItems.filter(item => !existingTitles.has(item.title));
+    // ② AI 篩選：從候選池選出最佳 8 則（半導體 max 2，其他 max 3，台美股皆有）
+    const selectedItems = anthropicKey
+      ? await selectNewsByAI(rssItems, anthropicKey)
+      : applySimpleSelection(rssItems);
 
-    // ③ AI 解析
+    // 按發布時間由新到舊排序（前端展示：新到舊由上至下）
+    selectedItems.sort((a, b) => (b.pubMs || 0) - (a.pubMs || 0));
+
+    // ③ 新聞增量（只寫入尚未在 Notion 的）
+    const newItems = selectedItems.filter(item => !existingTitles.has(item.title));
+
+    // ④ AI 解析（市場情緒用全部候選池；新聞個別解讀用新增的）
     let aiTexts = [];
     let marketAI = { twChip:'', usChip:'', twSent:'', usSent:'', newsSummary:'' };
     if (anthropicKey) {
       const tasks = [];
+      // 新聞個別 AI 解讀：只對新增的做
       if (newItems.length > 0) tasks.push(runNewsAI(newItems, anthropicKey).then(r=>{aiTexts=r;}));
+      // 市場情緒/籌碼：用全部候選池（rssItems）以獲得更廣的市場視角
       if (aiDbId && rssItems.length > 0) tasks.push(runMarketAI(rssItems, anthropicKey).then(r=>{marketAI=r;}));
       try { await Promise.all(tasks); } catch(e) { console.error('AI失敗',e.message); }
     }
     const enriched = newItems.map((item,i) => ({...item, ai:aiTexts[i]||''}));
 
-    // ④ 封存過時新聞
-    const freshTitleSet = new Set(rssItems.map(i=>i.title));
+    // ④ 封存不在本次選單中的舊新聞（freshTitleSet 改用 selectedItems）
+    const freshTitleSet = new Set(selectedItems.map(i=>i.title));
     const { archived: archivedCount, kept: keptDetail } = await archiveStaleEntries(existingPages, freshTitleSet, notionKey);
 
     // ⑤ 寫入新新聞
@@ -747,8 +814,8 @@ export default async function handler(req, res) {
     const now = formatTW(new Date()).full;
     if (aiDbId) {
       const analyses = [
-        { title:'台股籌碼解讀', type:'台股籌碼', content:marketAI.twChip, source:`Claude Haiku｜Google News ${rssItems.length}則（三大法人+融資融券+多空整合）｜${now}` },
-        { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則（機構資金+空頭+多空整合）｜${now}` },
+        { title:'台股籌碼解讀', type:'台股籌碼', content:marketAI.twChip, source:`Claude Haiku｜Google News ${rssItems.length}則候選（三大法人+融資融券+多空整合）｜${now}` },
+        { title:'美股籌碼解讀', type:'美股籌碼', content:marketAI.usChip, source:`Claude Haiku｜Google News ${rssItems.length}則候選（機構資金+空頭+多空整合）｜${now}` },
         { title:'台股市場情緒', type:'台股市場情緒', content:marketAI.twSent, source:`Claude Haiku｜台股新聞→情緒判斷｜${now}` },
         { title:'美股市場情緒', type:'美股市場情緒', content:marketAI.usSent, source:`Claude Haiku｜美股新聞→情緒判斷｜${now}` },
         // 快報頁面專用：綜合新聞摘要（與情緒判斷不同，著重事件本身）
