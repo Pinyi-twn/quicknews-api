@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-B'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-C'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -195,6 +195,11 @@ async function fetchTWSEMargin() {
                  || findKey(['融券','餘額'], ['限','前日']);
     const sLimKey = findKey(['融券','限額']);
 
+    // 輸出樣本列資料，用於診斷單位與欄位名稱
+    const sampleRow = data.find(r => parseFloat(String(r[mBalKey]||'').replace(/,/g,'')) > 0) || row0;
+    const sampleVal = mBalKey ? String(sampleRow[mBalKey]) : 'N/A';
+    console.log(`TWSE MI_MARGN sample: key="${mBalKey}" val="${sampleVal}" row0=${JSON.stringify(Object.fromEntries(allKeys.slice(0,6).map(k=>[k,row0[k]])))}`);
+
     const totalMBal = sumKey(mBalKey); // 千元
     const totalMLim = sumKey(mLimKey);
     const totalSBal = sumKey(sBalKey); // 千股
@@ -203,7 +208,7 @@ async function fetchTWSEMargin() {
     // 合理性檢查：台股融資餘額正常應 > 500億（50,000,000 千元）
     // 若遠低於此，代表 API 只回傳部分股票，資料不完整，避免寫入 Notion
     if (totalMBal < 50000000) {
-      const msg = `per-stock sum too low: ${(totalMBal/100000).toFixed(0)}億 (only ${data.length} stocks) — skipping to avoid bad data`;
+      const msg = `per-stock sum too low: ${(totalMBal/100000).toFixed(0)}億 (only ${data.length} stocks) — skipping to avoid bad data | key="${mBalKey}" sampleVal="${sampleVal}" rawSum=${totalMBal}`;
       console.log('TWSE MI_MARGN OpenAPI:', msg);
       return { _error: msg };
     }
