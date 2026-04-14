@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-C'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-D'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -110,126 +110,87 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
-  // ── 方法1：TWSE 主網站（市場整體合計，最準確）──
-  // 此端點返回整體市場的融資融券統計，不是逐股資料
-  try {
-    const r = await fetch('https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.twse.com.tw/',
+  const errors = [];
+
+  // ── 嘗試多個 TWSE URL 變體（主網站有市場整體合計，但 Vercel US 可能被擋）──
+  const PARSE_URLS = [
+    // 方法A: 新版 rwd，明確帶 selectType=MS（市場合計模式）
+    'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&selectType=MS',
+    // 方法B: 舊版 exchangeReport，同樣帶 MS
+    'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&selectType=MS',
+    // 方法C: 新版 rwd，不帶 selectType（原本失敗的URL）
+    'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json',
+  ];
+
+  for (const url of PARSE_URLS) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const r = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': 'https://www.twse.com.tw/',
+          'Accept-Language': 'zh-TW,zh;q=0.9',
+        }
+      });
+      clearTimeout(timeout);
+      if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+      const json = await r.json();
+      if (!json.fields || !json.data?.length) throw new Error('no data stat=' + json.stat);
+
+      const fields = json.fields;
+      // 找最新一行（有些模式回傳多日，取 data[0] 最新）
+      const row = json.data[0];
+      console.log(`TWSE MI_MARGN [${url.split('?')[1]}] fields:`, fields.slice(0,7).join(','));
+
+      const idxExcl = (incl, excl = []) => fields.findIndex(f =>
+        incl.every(kw => String(f).includes(kw)) && !excl.some(kw => String(f).includes(kw))
+      );
+      const idxAll = (...kws) => fields.findIndex(f => kws.every(kw => String(f).includes(kw)));
+      const getF = idx => idx >= 0 && row[idx] != null && row[idx] !== '' ? String(row[idx]).replace(/,/g,'') : null;
+
+      const result = {};
+      const mBalRaw = getF(idxExcl(['融資','餘額'], ['限']));
+      if (mBalRaw) { const n = parseFloat(mBalRaw); if (!isNaN(n) && n > 0) result['融資餘額'] = (n/100000).toFixed(0) + '億'; }
+
+      const mChgRaw = getF(idxAll('融資','增減'));
+      if (mChgRaw) { const n = parseFloat(mChgRaw); if (!isNaN(n)) result['融資餘額變動'] = (n>=0?'+':'') + (n/100000).toFixed(0) + '億'; }
+
+      const mRateRaw = getF(idxAll('融資','使用率'));
+      if (mRateRaw) result['融資使用率'] = mRateRaw.replace(/%/g,'').trim();
+
+      const sBalRaw = getF(idxExcl(['融券','餘額'], ['限']));
+      if (sBalRaw) {
+        const n = parseFloat(sBalRaw);
+        if (!isNaN(n) && n > 0) {
+          const lots = n / 1000;
+          result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
+        }
       }
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const json = await r.json();
-    if (!json.fields || !json.data?.length) throw new Error('no data stat=' + json.stat);
 
-    const fields = json.fields;
-    const row = json.data[0];
-    console.log('TWSE MI_MARGN main fields:', JSON.stringify(fields.slice(0,7)));
+      const sChgRaw = getF(idxAll('融券','增減'));
+      if (sChgRaw) { const n = parseFloat(sChgRaw); if (!isNaN(n)) { const lots = n/1000; result['融券餘額變動'] = (lots>=0?'+':'')+(Math.abs(lots)>=1000?(lots/1000).toFixed(1)+'千張':lots.toFixed(0)+'張'); } }
 
-    // AND 匹配（應對 '融資(元)_餘額'、'融資(元)_使用率(%)' 等帶括號的格式）
-    const idxExcl = (incl, excl = []) => fields.findIndex(f =>
-      incl.every(kw => String(f).includes(kw)) && !excl.some(kw => String(f).includes(kw))
-    );
-    const idxAll = (...kws) => fields.findIndex(f => kws.every(kw => String(f).includes(kw)));
-    const getF = idx => idx >= 0 && row[idx] != null && row[idx] !== '' ? String(row[idx]).replace(/,/g,'') : null;
+      const sRateRaw = getF(idxAll('融券','使用率'));
+      if (sRateRaw) result['融券使用率'] = sRateRaw.replace(/%/g,'').trim();
 
-    const result = {};
-    const mBalRaw = getF(idxExcl(['融資','餘額'], ['限']));
-    if (mBalRaw) { const n = parseFloat(mBalRaw); if (!isNaN(n) && n > 0) result['融資餘額'] = (n/100000).toFixed(0) + '億'; }
-
-    const mChgRaw = getF(idxAll('融資','增減'));
-    if (mChgRaw) { const n = parseFloat(mChgRaw); if (!isNaN(n)) result['融資餘額變動'] = (n>=0?'+':'') + (n/100000).toFixed(0) + '億'; }
-
-    const mRateRaw = getF(idxAll('融資','使用率'));
-    if (mRateRaw) result['融資使用率'] = mRateRaw.replace(/%/g,'').trim();
-
-    const sBalRaw = getF(idxExcl(['融券','餘額'], ['限']));
-    if (sBalRaw) {
-      const n = parseFloat(sBalRaw);
-      if (!isNaN(n) && n > 0) {
-        const lots = n / 1000;
-        result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
-      }
+      result._rawFields = `url=${url.split('?')[1]}:` + fields.slice(0,5).join(',');
+      console.log('TWSE MI_MARGN result:', JSON.stringify(result));
+      if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
+      errors.push(`${url.split('?')[1]}: fields matched but no values`);
+    } catch(e) {
+      const tag = url.includes('selectType=MS') ? (url.includes('rwd') ? 'rwd+MS' : 'old+MS') : 'rwd';
+      errors.push(`${tag}: ${e.message}`);
+      console.log(`TWSE MI_MARGN [${tag}] failed:`, e.message);
     }
-
-    const sChgRaw = getF(idxAll('融券','增減'));
-    if (sChgRaw) { const n = parseFloat(sChgRaw); if (!isNaN(n)) { const lots = n/1000; result['融券餘額變動'] = (lots>=0?'+':'')+(Math.abs(lots)>=1000?(lots/1000).toFixed(1)+'千張':lots.toFixed(0)+'張'); } }
-
-    const sRateRaw = getF(idxAll('融券','使用率'));
-    if (sRateRaw) result['融券使用率'] = sRateRaw.replace(/%/g,'').trim();
-
-    result._rawFields = 'main:' + fields.slice(0,5).join(',');
-    console.log('TWSE MI_MARGN main result:', JSON.stringify(result));
-    if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
-    throw new Error('no fields matched. fields=' + fields.slice(0,5).join(','));
-  } catch(e) {
-    console.log('TWSE MI_MARGN main failed:', e.message);
   }
 
-  // ── 方法2：TWSE OpenAPI 逐股加總（備用，可能不完整）──
-  try {
-    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN', {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (!Array.isArray(data) || !data.length) throw new Error('empty array');
-    const row0 = data[0];
-    const allKeys = Object.keys(row0);
-    console.log('TWSE MI_MARGN OpenAPI keys:', allKeys.join(', '), 'rows:', data.length);
-
-    const findKey = (incl, excl = []) =>
-      allKeys.find(k => incl.every(kw => k.includes(kw)) && !excl.some(kw => k.includes(kw)));
-    const sumKey = key => key ? data.reduce((s, r) => {
-      const v = parseFloat(String(r[key] || '0').replace(/,/g,''));
-      return s + (isNaN(v) ? 0 : v);
-    }, 0) : 0;
-
-    // 逐股格式：加總所有股票得市場合計
-    const mBalKey = allKeys.find(k => k.includes('融資') && k.includes('今日') && k.includes('餘額'))
-                 || findKey(['融資','餘額'], ['限','前日']);
-    const mLimKey = findKey(['融資','限額']);
-    const sBalKey = allKeys.find(k => k.includes('融券') && k.includes('今日') && k.includes('餘額'))
-                 || findKey(['融券','餘額'], ['限','前日']);
-    const sLimKey = findKey(['融券','限額']);
-
-    // 輸出樣本列資料，用於診斷單位與欄位名稱
-    const sampleRow = data.find(r => parseFloat(String(r[mBalKey]||'').replace(/,/g,'')) > 0) || row0;
-    const sampleVal = mBalKey ? String(sampleRow[mBalKey]) : 'N/A';
-    console.log(`TWSE MI_MARGN sample: key="${mBalKey}" val="${sampleVal}" row0=${JSON.stringify(Object.fromEntries(allKeys.slice(0,6).map(k=>[k,row0[k]])))}`);
-
-    const totalMBal = sumKey(mBalKey); // 千元
-    const totalMLim = sumKey(mLimKey);
-    const totalSBal = sumKey(sBalKey); // 千股
-    const totalSLim = sumKey(sLimKey);
-
-    // 合理性檢查：台股融資餘額正常應 > 500億（50,000,000 千元）
-    // 若遠低於此，代表 API 只回傳部分股票，資料不完整，避免寫入 Notion
-    if (totalMBal < 50000000) {
-      const msg = `per-stock sum too low: ${(totalMBal/100000).toFixed(0)}億 (only ${data.length} stocks) — skipping to avoid bad data | key="${mBalKey}" sampleVal="${sampleVal}" rawSum=${totalMBal}`;
-      console.log('TWSE MI_MARGN OpenAPI:', msg);
-      return { _error: msg };
-    }
-
-    const result = {};
-    result['融資餘額'] = (totalMBal / 100000).toFixed(0) + '億';
-    if (totalMLim > 0) result['融資使用率'] = (totalMBal / totalMLim * 100).toFixed(1);
-    if (totalSBal > 0) {
-      const lots = totalSBal / 1000;
-      result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
-    }
-    if (totalSLim > 0 && totalSBal > 0) result['融券使用率'] = (totalSBal / totalSLim * 100).toFixed(1);
-    result._rawFields = `openapi:${data.length}stocks`;
-    console.log('TWSE MI_MARGN OpenAPI totals:', JSON.stringify(result));
-    if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
-    throw new Error('no fields computed');
-  } catch(e) {
-    console.log('TWSE MI_MARGN OpenAPI failed:', e.message);
-    return { _error: e.message };
-  }
+  // 全部方法失敗：記錄詳細錯誤以便診斷
+  return { _error: errors.join(' | ') };
 }
+
 
 function computeMonitorData(yf) {
   const vix  = yf['^VIX']?.price || 18;
