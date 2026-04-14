@@ -108,95 +108,8 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
-  // ── 主要：TWSE OpenAPI（在 Vercel US 伺服器較穩定，不受 IP 地區限制）──
-  try {
-    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN', {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (!Array.isArray(data) || !data.length) throw new Error('empty array');
-    const row0 = data[0];
-    const allKeys = Object.keys(row0);
-    console.log('TWSE MI_MARGN OpenAPI keys:', allKeys.join(', '));
-
-    // 判斷是否為逐股格式（有股票代號欄位）→ 需加總所有股票
-    const isPerStock = allKeys.some(k => ['股票代號','StockCode','證券代號','SecuritiesCode'].some(kw => k.includes(kw)));
-
-    // 加總所有列的指定欄位
-    const sumKey = key => key ? data.reduce((s, r) => {
-      const v = parseFloat(String(r[key] || '0').replace(/,/g,''));
-      return s + (isNaN(v) ? 0 : v);
-    }, 0) : 0;
-
-    // 用 AND 匹配找欄位 key（排除 excl 字串）
-    const findKey = (incl, excl = []) =>
-      allKeys.find(k => incl.every(kw => k.includes(kw)) && !excl.some(kw => k.includes(kw)));
-
-    const result = {};
-
-    if (isPerStock) {
-      // 逐股格式：加總所有股票得市場合計
-      // 欄位如：融資今日餘額（千元）、融資限額（千元）、融券今日餘額（千股）、融券限額（千股）
-      const mBalKey = findKey(['融資'], ['前日','限','買','賣','現']) && allKeys.find(k => k.includes('融資') && k.includes('今日'));
-      const mBalKey2 = allKeys.find(k => k.includes('融資') && k.includes('今日') && k.includes('餘額'));
-      const mBalKeyFinal = mBalKey2 || findKey(['融資','餘額'], ['限','前日']);
-      const mLimKey = findKey(['融資','限額'], []);
-      const sBalKey = allKeys.find(k => k.includes('融券') && k.includes('今日') && k.includes('餘額'))
-                   || findKey(['融券','餘額'], ['限','前日']);
-      const sLimKey = findKey(['融券','限額'], []);
-
-      console.log('MI_MARGN per-stock keys: mBal=' + mBalKeyFinal + ' mLim=' + mLimKey + ' sBal=' + sBalKey + ' sLim=' + sLimKey);
-
-      const totalMBal = sumKey(mBalKeyFinal); // 千元
-      const totalMLim = sumKey(mLimKey);       // 千元
-      const totalSBal = sumKey(sBalKey);       // 千股
-      const totalSLim = sumKey(sLimKey);       // 千股
-
-      if (totalMBal > 0) result['融資餘額'] = (totalMBal / 100000).toFixed(0) + '億';
-      if (totalMLim > 0 && totalMBal > 0) result['融資使用率'] = (totalMBal / totalMLim * 100).toFixed(1);
-      if (totalSBal > 0) {
-        const lots = totalSBal / 1000; // 千股 → 張
-        result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
-      }
-      if (totalSLim > 0 && totalSBal > 0) result['融券使用率'] = (totalSBal / totalSLim * 100).toFixed(1);
-
-      result._rawKeys = allKeys.slice(0, 8).join(',');
-      result._stockCount = String(data.length);
-      console.log('TWSE MI_MARGN per-stock totals:', JSON.stringify(result));
-    } else {
-      // 市場合計格式：直接用第一列
-      const get = (...keys) => { for (const k of keys) if (row0[k] != null && row0[k] !== '') return String(row0[k]).replace(/,/g,''); return null; };
-      const getByIncl = (incl, excl = []) => { const k = findKey(incl, excl); return k && row0[k] != null && row0[k] !== '' ? String(row0[k]).replace(/,/g,'') : null; };
-
-      const mBal = getByIncl(['融資','餘額'], ['限']) || get('MarginPurchaseAmount','MarginBalance','融資_餘額','融資餘額');
-      if (mBal) { const n = parseFloat(mBal); if (!isNaN(n) && n > 0) result['融資餘額'] = (n/100000).toFixed(0) + '億'; }
-
-      const mRate = getByIncl(['融資','使用率']) || get('MarginPurchaseRatioPercent','融資_使用率','融資使用率');
-      if (mRate) result['融資使用率'] = String(mRate).replace(/%/g,'').trim();
-
-      const sBal = getByIncl(['融券','餘額'], ['限']) || get('ShortSalesAmount','ShortBalance','融券_餘額','融券餘額');
-      if (sBal) {
-        const n = parseFloat(sBal);
-        if (!isNaN(n) && n > 0) {
-          const lots = n / 1000;
-          result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
-        }
-      }
-
-      const sRate = getByIncl(['融券','使用率']) || get('ShortSalesRatioPercent','融券_使用率','融券使用率');
-      if (sRate) result['融券使用率'] = String(sRate).replace(/%/g,'').trim();
-      result._rawKeys = allKeys.slice(0, 8).join(',');
-      console.log('TWSE MI_MARGN market-total result:', JSON.stringify(result));
-    }
-
-    if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
-    throw new Error('no fields matched. keys=' + allKeys.slice(0,6).join(','));
-  } catch(e) {
-    console.log('TWSE MI_MARGN OpenAPI failed:', e.message);
-  }
-
-  // ── 備用：TWSE 主網站（台灣以外 IP 可能被封鎖）──
+  // ── 方法1：TWSE 主網站（市場整體合計，最準確）──
+  // 此端點返回整體市場的融資融券統計，不是逐股資料
   try {
     const r = await fetch('https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', {
       headers: {
@@ -245,12 +158,68 @@ async function fetchTWSEMargin() {
     const sRateRaw = getF(idxAll('融券','使用率'));
     if (sRateRaw) result['融券使用率'] = sRateRaw.replace(/%/g,'').trim();
 
-    result._rawFields = fields.slice(0,7).join(',');
+    result._rawFields = 'main:' + fields.slice(0,5).join(',');
     console.log('TWSE MI_MARGN main result:', JSON.stringify(result));
     if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
     throw new Error('no fields matched. fields=' + fields.slice(0,5).join(','));
   } catch(e) {
     console.log('TWSE MI_MARGN main failed:', e.message);
+  }
+
+  // ── 方法2：TWSE OpenAPI 逐股加總（備用，可能不完整）──
+  try {
+    const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN', {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (!Array.isArray(data) || !data.length) throw new Error('empty array');
+    const row0 = data[0];
+    const allKeys = Object.keys(row0);
+    console.log('TWSE MI_MARGN OpenAPI keys:', allKeys.join(', '), 'rows:', data.length);
+
+    const findKey = (incl, excl = []) =>
+      allKeys.find(k => incl.every(kw => k.includes(kw)) && !excl.some(kw => k.includes(kw)));
+    const sumKey = key => key ? data.reduce((s, r) => {
+      const v = parseFloat(String(r[key] || '0').replace(/,/g,''));
+      return s + (isNaN(v) ? 0 : v);
+    }, 0) : 0;
+
+    // 逐股格式：加總所有股票得市場合計
+    const mBalKey = allKeys.find(k => k.includes('融資') && k.includes('今日') && k.includes('餘額'))
+                 || findKey(['融資','餘額'], ['限','前日']);
+    const mLimKey = findKey(['融資','限額']);
+    const sBalKey = allKeys.find(k => k.includes('融券') && k.includes('今日') && k.includes('餘額'))
+                 || findKey(['融券','餘額'], ['限','前日']);
+    const sLimKey = findKey(['融券','限額']);
+
+    const totalMBal = sumKey(mBalKey); // 千元
+    const totalMLim = sumKey(mLimKey);
+    const totalSBal = sumKey(sBalKey); // 千股
+    const totalSLim = sumKey(sLimKey);
+
+    // 合理性檢查：台股融資餘額正常應 > 500億（50,000,000 千元）
+    // 若遠低於此，代表 API 只回傳部分股票，資料不完整，避免寫入 Notion
+    if (totalMBal < 50000000) {
+      const msg = `per-stock sum too low: ${(totalMBal/100000).toFixed(0)}億 (only ${data.length} stocks) — skipping to avoid bad data`;
+      console.log('TWSE MI_MARGN OpenAPI:', msg);
+      return { _error: msg };
+    }
+
+    const result = {};
+    result['融資餘額'] = (totalMBal / 100000).toFixed(0) + '億';
+    if (totalMLim > 0) result['融資使用率'] = (totalMBal / totalMLim * 100).toFixed(1);
+    if (totalSBal > 0) {
+      const lots = totalSBal / 1000;
+      result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
+    }
+    if (totalSLim > 0 && totalSBal > 0) result['融券使用率'] = (totalSBal / totalSLim * 100).toFixed(1);
+    result._rawFields = `openapi:${data.length}stocks`;
+    console.log('TWSE MI_MARGN OpenAPI totals:', JSON.stringify(result));
+    if (Object.keys(result).filter(k => !k.startsWith('_')).length > 0) return result;
+    throw new Error('no fields computed');
+  } catch(e) {
+    console.log('TWSE MI_MARGN OpenAPI failed:', e.message);
     return { _error: e.message };
   }
 }
