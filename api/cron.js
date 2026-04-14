@@ -1084,6 +1084,14 @@ export default async function handler(req, res) {
       monitor: monitorResult,
       yahooFinance: Object.keys(yfData).length,
       updatedAt: now,
+      // 診斷資訊
+      debug: {
+        twseMargin: twseMargin || null,
+        twseInst: twseInst ? Object.keys(twseInst) : null,
+        twseBreadth: twseBreadth || null,
+        yfShortInterest: yfShortInterest || null,
+        yfSymbols: Object.keys(yfData),
+      },
     });
   } catch(e) {
     console.error('Cron error:', e.message);
