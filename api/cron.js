@@ -6,6 +6,8 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
+const CRON_VERSION = 'v20260415-A'; // 版本標記，用於確認 Vercel 部署版本
+
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 const YF_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart/';
@@ -276,7 +278,7 @@ function computeMonitorData(yf) {
 
 // ── 美股短空比例：Yahoo Finance v10 quoteSummary（需 crumb 繞過 bot 偵測）──
 async function fetchYFShortInterest() {
-  const symbols = ['NVDA','TSLA','SPY','AAPL','META'];
+  const symbols = ['NVDA','TSLA','AAPL','META']; // SPY ETF 無 shortPercentOfFloat，已移除
   const results = {};
   const errors = [];
 
@@ -1048,7 +1050,7 @@ export default async function handler(req, res) {
 
       // 合併美股短空比例：v8 chart 為底，v10 quoteSummary 覆蓋（v10 被封鎖時退回 v8）
       const v8ShortData = {};
-      for (const sym of ['NVDA','TSLA','SPY','AAPL','META']) {
+      for (const sym of ['NVDA','TSLA','AAPL','META']) {
         const sp = yfData[sym]?.shortPercent;
         if (sp && sp > 0) v8ShortData[sym] = (sp * 100).toFixed(1);
       }
@@ -1144,6 +1146,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       success: true,
+      version: CRON_VERSION,
       rss: rssItems.length,
       newCount: enriched.length,
       aiCount: aiTexts.length,
@@ -1161,7 +1164,7 @@ export default async function handler(req, res) {
         twseBreadth: twseBreadth ? Object.keys(twseBreadth) : null,
         yfShortV10: Object.fromEntries(Object.entries(yfShortInterest || {}).filter(([k]) => !k.startsWith('_'))),
         yfShortErrors: (yfShortInterest || {})._errors || null,
-        v8ShortData: Object.fromEntries(['NVDA','TSLA','SPY','AAPL','META'].map(s => [s, yfData[s]?.shortPercent ? (yfData[s].shortPercent*100).toFixed(1) : null]).filter(([,v]) => v)),
+        v8ShortData: Object.fromEntries(['NVDA','TSLA','AAPL','META'].map(s => [s, yfData[s]?.shortPercent ? (yfData[s].shortPercent*100).toFixed(1) : null]).filter(([,v]) => v)),
         yfSymbols: Object.keys(yfData),
       },
     });
