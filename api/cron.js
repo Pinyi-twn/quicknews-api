@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-A'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-B'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -27,7 +27,7 @@ function formatTW(date) {
 // PART 1: Yahoo Finance 數據抓取
 // ══════════════════════════════════════════════════════════
 
-const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','SPY','QQQ','XLK','XLF','XLE','GC=F','CL=F'];
+const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','MSFT','GOOGL','AMZN','JPM','XOM','SPY','QQQ','XLK','XLF','XLE','GC=F','CL=F'];
 
 async function fetchYahooFinance() {
   const results = {};
@@ -278,7 +278,9 @@ function computeMonitorData(yf) {
 
 // ── 美股短空比例：Yahoo Finance v10 quoteSummary（需 crumb 繞過 bot 偵測）──
 async function fetchYFShortInterest() {
-  const symbols = ['NVDA','TSLA','AAPL','META']; // SPY ETF 無 shortPercentOfFloat，已移除
+  // 半導體/AI: NVDA; 電動車: TSLA; 消費科技: AAPL; 社群媒體: META
+  // 軟體/雲: MSFT,GOOGL; 電商/雲: AMZN; 金融: JPM; 能源: XOM
+  const symbols = ['NVDA','TSLA','AAPL','META','MSFT','GOOGL','AMZN','JPM','XOM'];
   const results = {};
   const errors = [];
 
@@ -627,7 +629,19 @@ ${headlines}
     const text = await callClaude('你是速懶報財經編輯，負責篩選每日快報新聞。', prompt, apiKey, 200);
     const indices = JSON.parse(text.replace(/```json|```/g,'').trim());
     if (!Array.isArray(indices) || !indices.length) throw new Error('empty');
-    const selected = indices.slice(0,8).map(i => items[i-1]).filter(Boolean);
+    const rawSelected = indices.slice(0,12).map(i => items[i-1]).filter(Boolean);
+    // 強制執行類別上限（AI 可能不遵守 prompt 規則）
+    const CAT_MAX = { '半導體': 2 };
+    const DEFAULT_MAX = 3;
+    const catCount = {};
+    const selected = [];
+    for (const item of rawSelected) {
+      if (selected.length >= 8) break;
+      const limit = CAT_MAX[item.tag] ?? DEFAULT_MAX;
+      if ((catCount[item.tag] || 0) >= limit) continue;
+      catCount[item.tag] = (catCount[item.tag] || 0) + 1;
+      selected.push(item);
+    }
     console.log(`[selectNewsByAI] AI 選出 ${selected.length} 則:`, selected.map(n=>`[${n.tag}]${n.title.slice(0,20)}`).join(' / '));
     return selected;
   } catch(e) {
@@ -1050,7 +1064,7 @@ export default async function handler(req, res) {
 
       // 合併美股短空比例：v8 chart 為底，v10 quoteSummary 覆蓋（v10 被封鎖時退回 v8）
       const v8ShortData = {};
-      for (const sym of ['NVDA','TSLA','AAPL','META']) {
+      for (const sym of ['NVDA','TSLA','AAPL','META','MSFT','GOOGL','AMZN','JPM','XOM']) {
         const sp = yfData[sym]?.shortPercent;
         if (sp && sp > 0) v8ShortData[sym] = (sp * 100).toFixed(1);
       }
@@ -1164,7 +1178,7 @@ export default async function handler(req, res) {
         twseBreadth: twseBreadth ? Object.keys(twseBreadth) : null,
         yfShortV10: Object.fromEntries(Object.entries(yfShortInterest || {}).filter(([k]) => !k.startsWith('_'))),
         yfShortErrors: (yfShortInterest || {})._errors || null,
-        v8ShortData: Object.fromEntries(['NVDA','TSLA','AAPL','META'].map(s => [s, yfData[s]?.shortPercent ? (yfData[s].shortPercent*100).toFixed(1) : null]).filter(([,v]) => v)),
+        v8ShortData: Object.fromEntries(['NVDA','TSLA','AAPL','META','MSFT','GOOGL','AMZN','JPM','XOM'].map(s => [s, yfData[s]?.shortPercent ? (yfData[s].shortPercent*100).toFixed(1) : null]).filter(([,v]) => v)),
         yfSymbols: Object.keys(yfData),
       },
     });
