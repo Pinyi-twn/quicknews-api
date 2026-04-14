@@ -116,17 +116,54 @@ async function fetchTWSEMargin() {
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
     const row = data[0];
+    console.log('TWSE MI_MARGN keys:', Object.keys(row).join(', '));
+    console.log('TWSE MI_MARGN row0:', JSON.stringify(row));
     const result = {};
     // 防禦性取值（欄位名因日期/版本可能不同）
-    const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined) return row[k]; } return null; };
-    const marginBal  = get('融資餘額','融資金額','margin_balance');
-    const marginRate = get('融資使用率','margin_ratio');
-    const shortBal   = get('融券餘額','融券股數','short_balance');
-    const shortRate  = get('融券使用率','short_ratio');
-    if (marginBal)  result['融資餘額']   = String(marginBal).replace(/,/g,'');
-    if (marginRate) result['融資使用率'] = String(marginRate).replace(/%/,'');
-    if (shortBal)   result['融券餘額']   = String(shortBal).replace(/,/g,'');
-    if (shortRate)  result['融券使用率'] = String(shortRate).replace(/%/,'');
+    const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return String(row[k]); } return null; };
+    // 融資餘額（千元 → 億元顯示）
+    const marginBalRaw = get('融資_餘額','融資餘額','融資金額','margin_balance','MarginBalance');
+    if (marginBalRaw) {
+      const n = parseFloat(marginBalRaw.replace(/,/g,''));
+      if (!isNaN(n) && n > 0) {
+        const yi = n > 1e8 ? (n/1e8).toFixed(0) : n > 1e5 ? (n/1e5).toFixed(0) : n.toFixed(0);
+        result['融資餘額'] = yi + '億';
+      }
+    }
+    // 融資增減（千元 → 億元）
+    const marginChgRaw = get('融資_增減','融資增減','margin_change','MarginChange');
+    if (marginChgRaw) {
+      const n = parseFloat(marginChgRaw.replace(/,/g,''));
+      if (!isNaN(n)) {
+        const yi = Math.abs(n) > 1e8 ? (n/1e8).toFixed(0) : Math.abs(n) > 1e5 ? (n/1e5).toFixed(0) : n.toFixed(0);
+        result['融資餘額變動'] = (n>=0?'+':'') + yi + '億';
+      }
+    }
+    // 融資使用率（%）
+    const marginRate = get('融資使用率(%)','融資使用率','margin_ratio','MarginRatio');
+    if (marginRate) result['融資使用率'] = String(marginRate).replace(/%/,'').trim();
+    // 融券餘額（張）
+    const shortBalRaw = get('融券_餘額','融券餘額','融券股數','short_balance','ShortBalance');
+    if (shortBalRaw) {
+      const n = parseFloat(shortBalRaw.replace(/,/g,''));
+      if (!isNaN(n) && n > 0) {
+        const display = n > 1e6 ? (n/1e4).toFixed(1)+'萬張' : n > 1e3 ? (n/1e3).toFixed(1)+'千張' : n.toFixed(0)+'張';
+        result['融券餘額'] = display;
+      }
+    }
+    // 融券增減
+    const shortChgRaw = get('融券_增減','融券增減','short_change','ShortChange');
+    if (shortChgRaw) {
+      const n = parseFloat(shortChgRaw.replace(/,/g,''));
+      if (!isNaN(n)) {
+        const display = Math.abs(n) > 1e3 ? (n/1e3).toFixed(1)+'千張' : (n>=0?'+':'')+n.toFixed(0)+'張';
+        result['融券餘額變動'] = display;
+      }
+    }
+    // 融券使用率
+    const shortRate = get('融券使用率(%)','融券使用率','short_ratio','ShortRatio');
+    if (shortRate) result['融券使用率'] = String(shortRate).replace(/%/,'').trim();
+    console.log('TWSE MI_MARGN result:', JSON.stringify(result));
     return Object.keys(result).length ? result : null;
   } catch(e) { console.log('TWSE margin failed:', e.message); return null; }
 }
@@ -868,8 +905,34 @@ export default async function handler(req, res) {
           else monitorData.push({ title:'外資近10日買賣超', value: last10 });
         }
       }
-      // 合併 TWSE 融資融券
+      // 合併 TWSE 融資融券（若 API 沒有增減欄位，從 Notion 前一次值推算）
       if (twseMargin) {
+        const getPrevNotion = title => {
+          const p = monitorPages.find(p => (p.properties?.Title?.title?.[0]?.text?.content||'') === title);
+          return p?.properties?.Value?.rich_text?.[0]?.text?.content || null;
+        };
+        const parseNum = str => parseFloat(str ? str.replace(/[^0-9.-]/g,'') : '');
+        // 融資餘額變動（API 沒給時從 Notion 前值計算）
+        if (twseMargin['融資餘額'] && !twseMargin['融資餘額變動']) {
+          const prev = getPrevNotion('融資餘額');
+          if (prev) {
+            const diff = parseNum(twseMargin['融資餘額']) - parseNum(prev);
+            if (!isNaN(diff) && parseNum(prev) > 0) {
+              twseMargin['融資餘額變動'] = (diff >= 0 ? '+' : '') + diff.toFixed(0) + '億';
+            }
+          }
+        }
+        // 融券餘額變動
+        if (twseMargin['融券餘額'] && !twseMargin['融券餘額變動']) {
+          const prev = getPrevNotion('融券餘額');
+          if (prev) {
+            const diff = parseNum(twseMargin['融券餘額']) - parseNum(prev);
+            if (!isNaN(diff) && parseNum(prev) > 0) {
+              const unit = (twseMargin['融券餘額'].match(/[^0-9.]+$/) || ['張'])[0];
+              twseMargin['融券餘額變動'] = (diff >= 0 ? '+' : '') + diff.toFixed(1) + unit;
+            }
+          }
+        }
         for (const [title, value] of Object.entries(twseMargin)) {
           const existing = monitorData.find(i => i.title === title);
           if (existing) existing.value = value;
