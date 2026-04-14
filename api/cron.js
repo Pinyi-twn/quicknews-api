@@ -108,6 +108,77 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
+  // 嘗試 TWSE 主網站 JSON API（欄位較穩定）
+  try {
+    const r = await fetch('https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.twse.com.tw/',
+      }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
+    console.log('TWSE MI_MARGN stat:', json.stat, 'fields:', JSON.stringify(json.fields));
+    if (!json.fields || !json.data?.length) throw new Error('no data');
+
+    const fields = json.fields;
+    const row = json.data[0]; // 最新一筆
+    console.log('TWSE MI_MARGN row0:', JSON.stringify(row));
+
+    const getIdx = (...kws) => fields.findIndex(f => kws.some(kw => String(f).includes(kw)));
+    const getVal = (...kws) => {
+      const i = getIdx(...kws);
+      return i >= 0 && row[i] != null && row[i] !== '' ? String(row[i]).replace(/,/g,'') : null;
+    };
+
+    const result = {};
+
+    // 融資餘額（千元 → 億元）
+    const mBalRaw = getVal('融資_餘額','融資餘額');
+    if (mBalRaw) {
+      const n = parseFloat(mBalRaw);
+      if (!isNaN(n) && n > 0) result['融資餘額'] = (n/100000).toFixed(0) + '億';
+    }
+    // 融資增減（千元 → 億元）
+    const mChgRaw = getVal('融資_增減','融資增減');
+    if (mChgRaw) {
+      const n = parseFloat(mChgRaw);
+      if (!isNaN(n)) result['融資餘額變動'] = (n>=0?'+':'') + (n/100000).toFixed(0) + '億';
+    }
+    // 融資使用率
+    const mRate = getVal('融資_使用率','融資使用率');
+    if (mRate) result['融資使用率'] = mRate.replace(/%/,'').trim();
+
+    // 融券餘額（千股 → 萬張：千股/1000=張，張/10000=萬張）
+    const sBalRaw = getVal('融券_餘額','融券餘額');
+    if (sBalRaw) {
+      const n = parseFloat(sBalRaw); // 單位：千股
+      if (!isNaN(n) && n > 0) {
+        const lots = n / 1000; // 千股 → 張
+        result['融券餘額'] = lots >= 10000 ? (lots/10000).toFixed(1)+'萬張' : lots >= 1000 ? (lots/1000).toFixed(1)+'千張' : lots.toFixed(0)+'張';
+      }
+    }
+    // 融券增減
+    const sChgRaw = getVal('融券_增減','融券增減');
+    if (sChgRaw) {
+      const n = parseFloat(sChgRaw); // 千股
+      if (!isNaN(n)) {
+        const lots = n / 1000;
+        result['融券餘額變動'] = (lots>=0?'+':'') + (Math.abs(lots)>=1000?(lots/1000).toFixed(1)+'千張':lots.toFixed(0)+'張');
+      }
+    }
+    // 融券使用率
+    const sRate = getVal('融券_使用率','融券使用率');
+    if (sRate) result['融券使用率'] = sRate.replace(/%/,'').trim();
+
+    console.log('TWSE MI_MARGN result:', JSON.stringify(result));
+    return Object.keys(result).length ? result : null;
+  } catch(e) {
+    console.log('TWSE MI_MARGN main site failed:', e.message);
+  }
+
+  // Fallback：OpenAPI
   try {
     const r = await fetch('https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN', {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
@@ -116,56 +187,18 @@ async function fetchTWSEMargin() {
     const data = await r.json();
     if (!Array.isArray(data) || !data.length) return null;
     const row = data[0];
-    console.log('TWSE MI_MARGN keys:', Object.keys(row).join(', '));
-    console.log('TWSE MI_MARGN row0:', JSON.stringify(row));
-    const result = {};
-    // 防禦性取值（欄位名因日期/版本可能不同）
+    console.log('TWSE MI_MARGN OpenAPI keys:', Object.keys(row).join(', '));
     const get = (...keys) => { for (const k of keys) { if (row[k] !== undefined && row[k] !== '') return String(row[k]); } return null; };
-    // 融資餘額（千元 → 億元顯示）
-    const marginBalRaw = get('融資_餘額','融資餘額','融資金額','margin_balance','MarginBalance');
-    if (marginBalRaw) {
-      const n = parseFloat(marginBalRaw.replace(/,/g,''));
-      if (!isNaN(n) && n > 0) {
-        const yi = n > 1e8 ? (n/1e8).toFixed(0) : n > 1e5 ? (n/1e5).toFixed(0) : n.toFixed(0);
-        result['融資餘額'] = yi + '億';
-      }
-    }
-    // 融資增減（千元 → 億元）
-    const marginChgRaw = get('融資_增減','融資增減','margin_change','MarginChange');
-    if (marginChgRaw) {
-      const n = parseFloat(marginChgRaw.replace(/,/g,''));
-      if (!isNaN(n)) {
-        const yi = Math.abs(n) > 1e8 ? (n/1e8).toFixed(0) : Math.abs(n) > 1e5 ? (n/1e5).toFixed(0) : n.toFixed(0);
-        result['融資餘額變動'] = (n>=0?'+':'') + yi + '億';
-      }
-    }
-    // 融資使用率（%）
-    const marginRate = get('融資使用率(%)','融資使用率','margin_ratio','MarginRatio');
-    if (marginRate) result['融資使用率'] = String(marginRate).replace(/%/,'').trim();
-    // 融券餘額（張）
-    const shortBalRaw = get('融券_餘額','融券餘額','融券股數','short_balance','ShortBalance');
-    if (shortBalRaw) {
-      const n = parseFloat(shortBalRaw.replace(/,/g,''));
-      if (!isNaN(n) && n > 0) {
-        const display = n > 1e6 ? (n/1e4).toFixed(1)+'萬張' : n > 1e3 ? (n/1e3).toFixed(1)+'千張' : n.toFixed(0)+'張';
-        result['融券餘額'] = display;
-      }
-    }
-    // 融券增減
-    const shortChgRaw = get('融券_增減','融券增減','short_change','ShortChange');
-    if (shortChgRaw) {
-      const n = parseFloat(shortChgRaw.replace(/,/g,''));
-      if (!isNaN(n)) {
-        const display = Math.abs(n) > 1e3 ? (n/1e3).toFixed(1)+'千張' : (n>=0?'+':'')+n.toFixed(0)+'張';
-        result['融券餘額變動'] = display;
-      }
-    }
-    // 融券使用率
-    const shortRate = get('融券使用率(%)','融券使用率','short_ratio','ShortRatio');
-    if (shortRate) result['融券使用率'] = String(shortRate).replace(/%/,'').trim();
-    console.log('TWSE MI_MARGN result:', JSON.stringify(result));
+    const result = {};
+    const mBal = get('融資_餘額','融資餘額','margin_balance');
+    if (mBal) { const n=parseFloat(mBal.replace(/,/g,'')); if(!isNaN(n)&&n>0) result['融資餘額']=(n/100000).toFixed(0)+'億'; }
+    const mRate = get('融資_使用率','融資使用率','margin_ratio');
+    if (mRate) result['融資使用率'] = mRate.replace(/%/,'').trim();
+    const sBal = get('融券_餘額','融券餘額','short_balance');
+    if (sBal) { const n=parseFloat(sBal.replace(/,/g,'')); if(!isNaN(n)&&n>0) { const lots=n/1000; result['融券餘額']=lots>=10000?(lots/10000).toFixed(1)+'萬張':lots.toFixed(0)+'張'; } }
+    console.log('TWSE MI_MARGN OpenAPI result:', JSON.stringify(result));
     return Object.keys(result).length ? result : null;
-  } catch(e) { console.log('TWSE margin failed:', e.message); return null; }
+  } catch(e) { console.log('TWSE margin OpenAPI failed:', e.message); return null; }
 }
 
 function computeMonitorData(yf) {
@@ -193,12 +226,6 @@ function computeMonitorData(yf) {
   const gold = yf['GC=F']?.price;
   const oil  = yf['CL=F']?.price;
 
-  // Short Interest（只用 Yahoo Finance 回傳的真實數字，無靜態 fallback）
-  const getShortNum = sym => {
-    const s = yf[sym]?.shortPercent;
-    return s ? (s * 100).toFixed(1) : null;
-  };
-
   const fmt = (p, ch) => `${p.toLocaleString()} (${ch>=0?'+':''}${ch}%)`;
 
   const items = [
@@ -221,13 +248,28 @@ function computeMonitorData(yf) {
   if (gold) items.push({ title:'黃金 GC=F', value: gold.toFixed(1) });
   if (oil)  items.push({ title:'原油 CL=F', value: oil.toFixed(2) });
 
-  // Short Interest（只用 YF 真實數值，無靜態 fallback）
-  for (const sym of ['NVDA','TSLA','SPY','AAPL','META']) {
-    const v = getShortNum(sym);
-    if (v) items.push({ title:`${sym} 短空%`, value: v });
-  }
-
   return items;
+}
+
+// ── 美股短空比例：Yahoo Finance v10 quoteSummary（比 v8/chart 更可靠）──
+async function fetchYFShortInterest() {
+  const symbols = ['NVDA','TSLA','SPY','AAPL','META'];
+  const results = {};
+  await Promise.all(symbols.map(async sym => {
+    try {
+      const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${sym}?modules=defaultKeyStatistics`;
+      const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const stats = data?.quoteSummary?.result?.[0]?.defaultKeyStatistics;
+      const raw = stats?.shortPercentOfFloat?.raw;
+      if (raw && raw > 0) {
+        results[sym] = (raw * 100).toFixed(1);
+        console.log(`YF v10 短空 ${sym}: ${results[sym]}%`);
+      }
+    } catch(e) { console.log(`YF v10 short ${sym} failed:`, e.message); }
+  }));
+  return results;
 }
 
 // ── TWSE 大盤成交統計（上漲/下跌家數）──────────────────────────
@@ -793,8 +835,8 @@ export default async function handler(req, res) {
   try {
     console.log('Cron: 開始...');
 
-    // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE + 歷史價格 + FRED
-    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twseBreadth, twseDividend, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, fredUNRATE, fredCPI] = await Promise.all([
+    // ① 同時抓：RSS + Notion + Yahoo Finance + TWSE + 歷史價格 + FRED + 短空比例
+    const [rssItems, { titleSet: existingTitles, pages: existingPages }, existingAnalyses, monitorPages, yfData, twseInst, twseChips, twseMargin, twseBreadth, twseDividend, twHistory, usHistory, fredDGS10, fredT10Y2Y, fredFEDFUNDS, fredUNRATE, fredCPI, yfShortInterest] = await Promise.all([
       fetchLatestNews(),
       fetchExistingEntries(dbId, notionKey),
       aiDbId ? fetchExistingAnalyses(aiDbId, notionKey) : Promise.resolve([]),
@@ -812,6 +854,7 @@ export default async function handler(req, res) {
       fetchFRED('FEDFUNDS'),
       fetchFRED('UNRATE'),
       fetchFRED('CPIAUCSL', 'pc1'),
+      fetchYFShortInterest(),
     ]);
     console.log(`Cron: RSS ${rssItems.length} 則候選 / YF ${Object.keys(yfData).length} symbols`);
 
@@ -939,6 +982,16 @@ export default async function handler(req, res) {
           else monitorData.push({ title, value });
         }
         console.log(`Cron: TWSE 融資融券 ${Object.keys(twseMargin).length} 筆`);
+      }
+
+      // 合併美股短空比例（Yahoo Finance v10）
+      if (yfShortInterest && Object.keys(yfShortInterest).length) {
+        for (const [sym, val] of Object.entries(yfShortInterest)) {
+          const title = `${sym} 短空%`;
+          const ex = monitorData.find(i => i.title === title);
+          if (ex) ex.value = val; else monitorData.push({ title, value: val });
+        }
+        console.log(`Cron: 美股短空比例 ${Object.keys(yfShortInterest).length} 筆: ${JSON.stringify(yfShortInterest)}`);
       }
 
       // 合併 TWSE 大盤市場廣度（上漲/下跌家數、成交金額）
