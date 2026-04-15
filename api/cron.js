@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-F'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-G'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -110,26 +110,10 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
-  const errors = [];
+  // TWSE 市場概況（融資融券整體統計）只在台灣收盤後（13:30 後）發布
+  // rwd 端點忽略 date 參數，永遠回傳當天數據（盤中為空）
+  // 自動 cron 在 14:00/17:10/21:45 台灣時間執行，收盤後應有數據
 
-  // 台灣時間（UTC+8）最近 N 個工作日的日期字串（從昨天開始往前）
-  function recentTWDates(n) {
-    const dates = [];
-    const d = new Date(Date.now() + 8 * 3600000);
-    d.setUTCDate(d.getUTCDate() - 1);
-    while (dates.length < n) {
-      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) {
-        const y = d.getUTCFullYear();
-        const m = String(d.getUTCMonth()+1).padStart(2,'0');
-        const day = String(d.getUTCDate()).padStart(2,'0');
-        dates.push(`${y}${m}${day}`);
-      }
-      d.setUTCDate(d.getUTCDate() - 1);
-    }
-    return dates;
-  }
-
-  // 解析 TWSE MI_MARGN 市場整體概況欄位（rwd 無 selectType 格式）
   function parseMarginRow(fields, row) {
     const result = {};
     const idx = (incl, excl = []) => fields.findIndex(f =>
@@ -172,55 +156,35 @@ async function fetchTWSEMargin() {
     return result;
   }
 
-  const doFetch = async (url, timeout = 10000) => {
+  try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeout);
-    try {
-      const r = await fetch(url, { signal: ctrl.signal, headers: {
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    const r = await fetch('https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', {
+      signal: ctrl.signal,
+      headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://www.twse.com.tw/',
         'Accept-Language': 'zh-TW,zh;q=0.9',
-      }});
-      clearTimeout(t);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json();
-    } catch(e) { clearTimeout(t); throw e; }
-  };
+      }
+    });
+    clearTimeout(t);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
 
-  const dates = recentTWDates(5);
+    if (!json.fields || !json.data?.length) {
+      // stat=OK 但無數據 = 盤中或數據未發布（自動 cron 收盤後執行應正常）
+      return { _error: `market open or data not yet published (stat=${json.stat})` };
+    }
 
-  // ── 方法1：rwd + 具體日期（無 selectType）──
-  // selectType=MS 是月報摘要，非日報市場概況，不含數據；正確方式是直接帶日期
-  for (const date of dates) {
-    try {
-      const json = await doFetch(
-        `https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&date=${date}`
-      );
-      if (!json.fields || !json.data?.length) { errors.push(`rwd+${date}: no data`); continue; }
-      const row = json.data[0];
-      const result = parseMarginRow(json.fields, row);
-      result._rawFields = `rwd+${date}:` + json.fields.slice(0,6).join(',');
-      console.log('TWSE MI_MARGN result:', JSON.stringify(result), 'date', date);
-      if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-      errors.push(`rwd+${date}: no match. fields=${json.fields.slice(0,6).join(',')}`);
-    } catch(e) { errors.push(`rwd+${date}: ${e.message}`); }
-  }
-
-  // ── 方法2：rwd 不帶日期（抓最新數據，允許更長 timeout）──
-  try {
-    const json = await doFetch(
-      'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', 20000
-    );
-    if (!json.fields || !json.data?.length) throw new Error('no data stat=' + json.stat);
-    const row = json.data[0];
-    const result = parseMarginRow(json.fields, row);
-    result._rawFields = 'rwd_latest:' + json.fields.slice(0,6).join(',');
+    const result = parseMarginRow(json.fields, json.data[0]);
+    result._rawFields = 'rwd:' + json.fields.slice(0,6).join(',');
+    console.log('TWSE MI_MARGN result:', JSON.stringify(result));
     if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-    errors.push('rwd_latest: no match. fields=' + json.fields.slice(0,6).join(','));
-  } catch(e) { errors.push(`rwd_latest: ${e.message}`); }
-
-  return { _error: errors.join(' | ') };
+    return { _error: 'no fields matched. fields=' + json.fields.slice(0,6).join(',') };
+  } catch(e) {
+    return { _error: 'rwd: ' + e.message };
+  }
 }
 
 
