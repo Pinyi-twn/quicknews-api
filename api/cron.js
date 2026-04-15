@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-A'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-B'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -213,37 +213,43 @@ async function fetchTWSEMargin() {
     return Object.keys(result).filter(k => !k.startsWith('_')).length >= 2 ? result : null;
   };
 
-  const BASE = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
+  const RWD = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
+  const EXR = 'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json';
   const errors = [];
+  const rocDates = recentROCDates(3);
 
-  // 方法1：不帶日期（今日數據，收盤後才有）
-  try {
-    const json = await doFetch(BASE);
-    const r = tryParse(json, 'today');
-    if (r) return r;
-    if (!json.fields && json.stat === 'OK') {
-      // 數據未就緒（盤中或午夜後），改用歷史數據
-    } else if (json.fields) {
-      errors.push(`today: fields no match. ${json.fields.slice(0,5).join(',')}`);
-    }
-  } catch(e) { errors.push(`today: ${e.message}`); }
-
-  // 方法2：民國曆日期格式抓最近工作日歷史數據（盤中/午夜後均可用）
-  const rocDates = recentROCDates(4);
-  for (const rocDate of rocDates) {
+  // 每次 fetch 後統一記錄結果（無論 stat 為何）
+  const attempt = async (url, tag) => {
     try {
-      const json = await doFetch(`${BASE}&date=${rocDate}`);
-      const r = tryParse(json, `roc${rocDate}`);
+      const json = await doFetch(url);
+      const r = tryParse(json, tag);
       if (r) return r;
-      if (!json.fields && json.stat === 'OK') {
-        errors.push(`roc${rocDate}: no data (holiday?)`);
-      } else if (json.fields) {
-        errors.push(`roc${rocDate}: fields no match. ${json.fields.slice(0,5).join(',')}`);
-      }
-    } catch(e) { errors.push(`roc${rocDate}: ${e.message}`); }
+      // 記錄實際 stat 值以便診斷（TWSE 可能回傳中文錯誤訊息）
+      errors.push(`${tag}: stat="${json.stat}" fields=${!!json.fields} data=${json.data?.length ?? 0}`);
+      return null;
+    } catch(e) {
+      errors.push(`${tag}: ${e.message}`);
+      return null;
+    }
+  };
+
+  // 方法A：rwd 不帶日期（今日數據，收盤後才有；凌晨/盤中為空）
+  const ra = await attempt(RWD, 'rwd_today');
+  if (ra) return ra;
+
+  // 方法B：rwd + 民國曆日期（歷史數據；若 rwd 支援此參數則任何時間均可用）
+  for (const rocDate of rocDates) {
+    const rb = await attempt(`${RWD}&date=${rocDate}`, `rwd_${rocDate}`);
+    if (rb) return rb;
   }
 
-  return { _error: errors.join(' | ') || 'all methods failed' };
+  // 方法C：exchangeReport + selectType=MS + 民國曆日期（舊版API，市場概況模式）
+  for (const rocDate of rocDates.slice(0, 2)) {
+    const rc = await attempt(`${EXR}&selectType=MS&date=${rocDate}`, `exr_MS_${rocDate}`);
+    if (rc) return rc;
+  }
+
+  return { _error: errors.join(' | ') };
 }
 
 
