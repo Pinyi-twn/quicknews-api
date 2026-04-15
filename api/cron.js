@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-E'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-F'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -112,13 +112,13 @@ async function fetchFRED(seriesId, units = 'lin') {
 async function fetchTWSEMargin() {
   const errors = [];
 
-  // 台灣時間（UTC+8）最近 N 個工作日的日期字串（從昨天開始往前，今天數據收盤後才發布）
+  // 台灣時間（UTC+8）最近 N 個工作日的日期字串（從昨天開始往前）
   function recentTWDates(n) {
     const dates = [];
-    const d = new Date(Date.now() + 8 * 3600000); // Taiwan time
-    d.setUTCDate(d.getUTCDate() - 1); // start from yesterday
+    const d = new Date(Date.now() + 8 * 3600000);
+    d.setUTCDate(d.getUTCDate() - 1);
     while (dates.length < n) {
-      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) { // skip Sat/Sun
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) {
         const y = d.getUTCFullYear();
         const m = String(d.getUTCMonth()+1).padStart(2,'0');
         const day = String(d.getUTCDate()).padStart(2,'0');
@@ -129,23 +129,20 @@ async function fetchTWSEMargin() {
     return dates;
   }
 
-  // 解析 TWSE MI_MARGN 市場整體概況格式（selectType=MS 或 rwd 預設格式均適用）
-  function parseMSRow(fields, row) {
+  // 解析 TWSE MI_MARGN 市場整體概況欄位（rwd 無 selectType 格式）
+  function parseMarginRow(fields, row) {
     const result = {};
     const idx = (incl, excl = []) => fields.findIndex(f =>
       incl.every(kw => String(f).includes(kw)) && !excl.some(kw => String(f).includes(kw))
     );
     const getF = i => i >= 0 && row[i] != null && row[i] !== '' ? String(row[i]).replace(/,/g,'') : null;
 
-    // 融資餘額 — '融資(元)_今日餘額' or '融資_餘額'
     const mBalRaw = getF(idx(['融資','餘額'], ['限']));
     if (mBalRaw) { const n = parseFloat(mBalRaw); if (!isNaN(n) && n > 0) result['融資餘額'] = (n/100000).toFixed(0) + '億'; }
 
-    // 融資使用率 — '融資(元)_資使率' or '融資_使用率'
-    const mRateRaw = getF(idx(['融資','使用率'])) != null ? getF(idx(['融資','使用率'])) : getF(idx(['融資','資使率']));
+    const mRateRaw = getF(idx(['融資','使用率'])) ?? getF(idx(['融資','資使率']));
     if (mRateRaw) result['融資使用率'] = mRateRaw.replace(/%/g,'').trim();
 
-    // 融資餘額變動 — 直接的增減字段 or 由 買進-賣出-現金償還 計算
     const mChgRaw = getF(idx(['融資','增減']));
     if (mChgRaw) {
       const n = parseFloat(mChgRaw);
@@ -160,7 +157,6 @@ async function fetchTWSEMargin() {
       }
     }
 
-    // 融券餘額 — '融券(股)_今日餘額' or '融券_餘額' (unit: 股)
     const sBalRaw = getF(idx(['融券','餘額'], ['限']));
     if (sBalRaw) {
       const n = parseFloat(sBalRaw);
@@ -170,20 +166,16 @@ async function fetchTWSEMargin() {
       }
     }
 
-    // 融券使用率 — '融券(股)_券使率' or '融券_使用率'
-    const sRateRaw = getF(idx(['融券','使用率'])) != null ? getF(idx(['融券','使用率'])) : getF(idx(['融券','券使率']));
+    const sRateRaw = getF(idx(['融券','使用率'])) ?? getF(idx(['融券','券使率']));
     if (sRateRaw) result['融券使用率'] = sRateRaw.replace(/%/g,'').trim();
 
     return result;
   }
 
-  // ── 方法1：rwd+MS+日期（已確認 Vercel US 可存取，需指定日期）──
-  const dates = recentTWDates(4);
-  for (const date of dates) {
-    const url = `https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&selectType=MS&date=${date}`;
+  const doFetch = async (url, timeout = 10000) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 8000);
       const r = await fetch(url, { signal: ctrl.signal, headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -192,42 +184,41 @@ async function fetchTWSEMargin() {
       }});
       clearTimeout(t);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const json = await r.json();
-      if (!json.fields || !json.data?.length) { errors.push(`rwd+MS+${date}: no data (holiday?)`); continue; }
-      // selectType=MS 可能回傳當月多日；取最後一列（最近一天）
-      const row = json.data[json.data.length - 1];
-      const result = parseMSRow(json.fields, row);
-      result._rawFields = `rwd+MS+${date}:` + json.fields.slice(0,5).join(',');
-      console.log('TWSE MI_MARGN MS result:', JSON.stringify(result), 'date', date);
+      return await r.json();
+    } catch(e) { clearTimeout(t); throw e; }
+  };
+
+  const dates = recentTWDates(5);
+
+  // ── 方法1：rwd + 具體日期（無 selectType）──
+  // selectType=MS 是月報摘要，非日報市場概況，不含數據；正確方式是直接帶日期
+  for (const date of dates) {
+    try {
+      const json = await doFetch(
+        `https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&date=${date}`
+      );
+      if (!json.fields || !json.data?.length) { errors.push(`rwd+${date}: no data`); continue; }
+      const row = json.data[0];
+      const result = parseMarginRow(json.fields, row);
+      result._rawFields = `rwd+${date}:` + json.fields.slice(0,6).join(',');
+      console.log('TWSE MI_MARGN result:', JSON.stringify(result), 'date', date);
       if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-      errors.push(`rwd+MS+${date}: matched but no values. fields=${json.fields.slice(0,5).join(',')}`);
-    } catch(e) {
-      errors.push(`rwd+MS+${date}: ${e.message}`);
-    }
+      errors.push(`rwd+${date}: no match. fields=${json.fields.slice(0,6).join(',')}`);
+    } catch(e) { errors.push(`rwd+${date}: ${e.message}`); }
   }
 
-  // ── 方法2：舊版 exchangeReport+MS+日期（備用）──
-  const url2 = `https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&selectType=MS&date=${dates[0]}`;
+  // ── 方法2：rwd 不帶日期（抓最新數據，允許更長 timeout）──
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 8000);
-    const r = await fetch(url2, { signal: ctrl.signal, headers: {
-      'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0',
-      'Referer': 'https://www.twse.com.tw/',
-    }});
-    clearTimeout(t);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const json = await r.json();
-    if (json.fields && json.data?.length) {
-      const row = json.data[json.data.length - 1];
-      const result = parseMSRow(json.fields, row);
-      result._rawFields = `old+MS+${dates[0]}:` + json.fields.slice(0,5).join(',');
-      if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-    }
-    errors.push(`old+MS: no data stat=${json.stat}`);
-  } catch(e) {
-    errors.push(`old+MS: ${e.message}`);
-  }
+    const json = await doFetch(
+      'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', 20000
+    );
+    if (!json.fields || !json.data?.length) throw new Error('no data stat=' + json.stat);
+    const row = json.data[0];
+    const result = parseMarginRow(json.fields, row);
+    result._rawFields = 'rwd_latest:' + json.fields.slice(0,6).join(',');
+    if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
+    errors.push('rwd_latest: no match. fields=' + json.fields.slice(0,6).join(','));
+  } catch(e) { errors.push(`rwd_latest: ${e.message}`); }
 
   return { _error: errors.join(' | ') };
 }
