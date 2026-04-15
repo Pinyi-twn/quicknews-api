@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-H'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-A'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -110,9 +110,29 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
-  // TWSE 市場概況（融資融券整體統計）只在台灣收盤後（13:30 後）發布
-  // rwd 端點忽略 date 參數，永遠回傳當天數據（盤中為空）
-  // 自動 cron 在 14:00/17:10/21:45 台灣時間執行，收盤後應有數據
+  // TWSE rwd 端點：
+  //   - 不帶日期：回傳當日數據（收盤前為空）
+  //   - 帶民國曆日期 date=YYYMMDD（e.g. 1150415）：回傳該日歷史數據
+  // 策略：先試不帶日期（若已收盤即有今日數據），再依序試最近工作日的歷史數據
+
+  // 民國曆日期字串（TWSE 格式：年不補零，月日補零）
+  function toROCDate(d) {
+    const rocY = d.getUTCFullYear() - 1911;
+    const m = String(d.getUTCMonth()+1).padStart(2,'0');
+    const day = String(d.getUTCDate()).padStart(2,'0');
+    return `${rocY}${m}${day}`;
+  }
+  // 台灣時間（UTC+8）最近 N 個工作日（從昨天往前）
+  function recentROCDates(n) {
+    const dates = [];
+    const d = new Date(Date.now() + 8 * 3600000);
+    d.setUTCDate(d.getUTCDate() - 1);
+    while (dates.length < n) {
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) dates.push(toROCDate(d));
+      d.setUTCDate(d.getUTCDate() - 1);
+    }
+    return dates;
+  }
 
   function parseMarginRow(fields, row) {
     const result = {};
@@ -156,53 +176,75 @@ async function fetchTWSEMargin() {
     return result;
   }
 
-  try {
+  function pickBestRow(fields, data) {
+    const mBalIdx = fields.findIndex(f =>
+      ['融資','餘額'].every(kw => f.includes(kw)) && !f.includes('限')
+    );
+    if (mBalIdx < 0 || data.length === 1) return data[0];
+    let best = data[0], maxVal = -1;
+    for (const row of data) {
+      const v = parseFloat(String(row[mBalIdx] || '0').replace(/,/g,''));
+      if (!isNaN(v) && v > maxVal) { maxVal = v; best = row; }
+    }
+    return best;
+  }
+
+  const doFetch = async (url) => {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 15000);
-    const r = await fetch('https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json', {
-      signal: ctrl.signal,
-      headers: {
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal, headers: {
         'Accept': 'application/json',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://www.twse.com.tw/',
         'Accept-Language': 'zh-TW,zh;q=0.9',
-      }
-    });
-    clearTimeout(t);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const json = await r.json();
+      }});
+      clearTimeout(t);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch(e) { clearTimeout(t); throw e; }
+  };
 
-    if (!json.fields || !json.data?.length) {
-      // stat=OK 但無數據 = 盤中或數據未發布（自動 cron 收盤後執行應正常）
-      return { _error: `market open or data not yet published (stat=${json.stat})` };
+  const tryParse = (json, tag) => {
+    if (!json.fields || !json.data?.length) return null;
+    const row = pickBestRow(json.fields, json.data);
+    const result = parseMarginRow(json.fields, row);
+    result._rawFields = `${tag}:rows=${json.data.length} fields=${json.fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
+    return Object.keys(result).filter(k => !k.startsWith('_')).length >= 2 ? result : null;
+  };
+
+  const BASE = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
+  const errors = [];
+
+  // 方法1：不帶日期（今日數據，收盤後才有）
+  try {
+    const json = await doFetch(BASE);
+    const r = tryParse(json, 'today');
+    if (r) return r;
+    if (!json.fields && json.stat === 'OK') {
+      // 數據未就緒（盤中或午夜後），改用歷史數據
+    } else if (json.fields) {
+      errors.push(`today: fields no match. ${json.fields.slice(0,5).join(',')}`);
     }
+  } catch(e) { errors.push(`today: ${e.message}`); }
 
-    // 找融資餘額最大的行（排除「限」字，避免選到限額行）
-    // rwd 可能回傳多行（多日期、多類別等），「合計」或最新日行的值最大
-    const fields = json.fields;
-    const mBalIdx = fields.findIndex(f =>
-      ['融資','餘額'].every(kw => f.includes(kw)) && !f.includes('限')
-    );
-    let bestRow = json.data[0];
-    if (mBalIdx >= 0 && json.data.length > 1) {
-      let maxVal = -1;
-      for (const row of json.data) {
-        const v = parseFloat(String(row[mBalIdx] || '0').replace(/,/g,''));
-        if (!isNaN(v) && v > maxVal) { maxVal = v; bestRow = row; }
+  // 方法2：民國曆日期格式抓最近工作日歷史數據（盤中/午夜後均可用）
+  const rocDates = recentROCDates(4);
+  for (const rocDate of rocDates) {
+    try {
+      const json = await doFetch(`${BASE}&date=${rocDate}`);
+      const r = tryParse(json, `roc${rocDate}`);
+      if (r) return r;
+      if (!json.fields && json.stat === 'OK') {
+        errors.push(`roc${rocDate}: no data (holiday?)`);
+      } else if (json.fields) {
+        errors.push(`roc${rocDate}: fields no match. ${json.fields.slice(0,5).join(',')}`);
       }
-    }
-
-    const result = parseMarginRow(fields, bestRow);
-    // 包含診斷資訊：行數、欄位名、選中行的前6個值
-    result._rawFields = `rwd:rows=${json.data.length} mBalIdx=${mBalIdx} fields=${fields.slice(0,6).join('|')} vals=${bestRow.slice(0,7).join('|')}`;
-    console.log('TWSE MI_MARGN result:', JSON.stringify(result));
-    if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-    return { _error: 'no fields matched. ' + result._rawFields };
-  } catch(e) {
-    return { _error: 'rwd: ' + e.message };
+    } catch(e) { errors.push(`roc${rocDate}: ${e.message}`); }
   }
-}
 
+  return { _error: errors.join(' | ') || 'all methods failed' };
+}
 
 
 function computeMonitorData(yf) {
