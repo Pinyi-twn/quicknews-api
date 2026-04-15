@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-B'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-C'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -110,25 +110,24 @@ async function fetchFRED(seriesId, units = 'lin') {
   } catch(e) { console.log(`FRED ${seriesId} failed:`, e.message); return null; }
 }
 async function fetchTWSEMargin() {
-  // TWSE rwd 端點：
-  //   - 不帶日期：回傳當日數據（收盤前為空）
-  //   - 帶民國曆日期 date=YYYMMDD（e.g. 1150415）：回傳該日歷史數據
-  // 策略：先試不帶日期（若已收盤即有今日數據），再依序試最近工作日的歷史數據
+  // TWSE 融資融券概況：
+  //   - rwd 端點（不帶日期）：當日數據，僅收盤後（13:30 台灣時間）可用
+  //   - exchangeReport 端點 + selectType=MS + Gregorian 日期（YYYYMMDD）：
+  //     歷史日數據，24h 可用，用於早盤/凌晨 cron 抓前一個工作日數據
 
-  // 民國曆日期字串（TWSE 格式：年不補零，月日補零）
-  function toROCDate(d) {
-    const rocY = d.getUTCFullYear() - 1911;
+  // Gregorian 日期字串（TWSE exchangeReport 格式：YYYYMMDD）
+  function toDateStr(d) {
+    const y = d.getUTCFullYear();
     const m = String(d.getUTCMonth()+1).padStart(2,'0');
     const day = String(d.getUTCDate()).padStart(2,'0');
-    return `${rocY}${m}${day}`;
+    return `${y}${m}${day}`;
   }
-  // 台灣時間（UTC+8）最近 N 個工作日（從昨天往前）
-  function recentROCDates(n) {
+  // 台灣時間最近 N 個工作日（從今天往前，含今天）
+  function recentDates(n) {
     const dates = [];
     const d = new Date(Date.now() + 8 * 3600000);
-    d.setUTCDate(d.getUTCDate() - 1);
     while (dates.length < n) {
-      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) dates.push(toROCDate(d));
+      if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) dates.push(toDateStr(d));
       d.setUTCDate(d.getUTCDate() - 1);
     }
     return dates;
@@ -210,13 +209,25 @@ async function fetchTWSEMargin() {
     const row = pickBestRow(json.fields, json.data);
     const result = parseMarginRow(json.fields, row);
     result._rawFields = `${tag}:rows=${json.data.length} fields=${json.fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
-    return Object.keys(result).filter(k => !k.startsWith('_')).length >= 2 ? result : null;
+    const dataKeys = Object.keys(result).filter(k => !k.startsWith('_'));
+    if (dataKeys.length < 2) return null;
+    // 融資餘額合理性檢查：市場合計應 > 500億；若過小代表抓到單一股票資料而非市場合計
+    const mBal = result['融資餘額'];
+    if (mBal) {
+      const n = parseFloat(mBal);
+      if (!isNaN(n) && n < 500) {
+        errors.push(`${tag}: 融資餘額=${mBal} 過小（非市場合計），略過`);
+        return null;
+      }
+    }
+    return result;
   };
 
   const RWD = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
+  // exchangeReport 使用西元日期（YYYYMMDD），非民國曆；selectType=MS 為市場統計（市場別合計）
   const EXR = 'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json';
   const errors = [];
-  const rocDates = recentROCDates(3);
+  const dates = recentDates(6); // 今天 + 最近 5 個工作日（跨假日/連假時備用）
 
   // 每次 fetch 後統一記錄結果（無論 stat 為何）
   const attempt = async (url, tag) => {
@@ -233,20 +244,16 @@ async function fetchTWSEMargin() {
     }
   };
 
-  // 方法A：rwd 不帶日期（今日數據，收盤後才有；凌晨/盤中為空）
+  // 方法A：rwd 不帶日期（當日數據，收盤後 13:30~24:00 台灣時間才有）
   const ra = await attempt(RWD, 'rwd_today');
   if (ra) return ra;
 
-  // 方法B：rwd + 民國曆日期（歷史數據；若 rwd 支援此參數則任何時間均可用）
-  for (const rocDate of rocDates) {
-    const rb = await attempt(`${RWD}&date=${rocDate}`, `rwd_${rocDate}`);
+  // 方法B：exchangeReport + selectType=MS + 西元日期（24h 可用的歷史數據）
+  //   - 從今天往前試，第一個有資料的工作日即採用
+  //   - 確保早盤（06:30 cron）或凌晨也能拿到前一個工作日的數據
+  for (const date of dates) {
+    const rb = await attempt(`${EXR}&selectType=MS&date=${date}`, `exr_${date}`);
     if (rb) return rb;
-  }
-
-  // 方法C：exchangeReport + selectType=MS + 民國曆日期（舊版API，市場概況模式）
-  for (const rocDate of rocDates.slice(0, 2)) {
-    const rc = await attempt(`${EXR}&selectType=MS&date=${rocDate}`, `exr_MS_${rocDate}`);
-    if (rc) return rc;
   }
 
   return { _error: errors.join(' | ') };
