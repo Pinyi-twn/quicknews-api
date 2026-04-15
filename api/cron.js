@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260415-G'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260415-H'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -177,11 +177,27 @@ async function fetchTWSEMargin() {
       return { _error: `market open or data not yet published (stat=${json.stat})` };
     }
 
-    const result = parseMarginRow(json.fields, json.data[0]);
-    result._rawFields = 'rwd:' + json.fields.slice(0,6).join(',');
+    // 找融資餘額最大的行（排除「限」字，避免選到限額行）
+    // rwd 可能回傳多行（多日期、多類別等），「合計」或最新日行的值最大
+    const fields = json.fields;
+    const mBalIdx = fields.findIndex(f =>
+      ['融資','餘額'].every(kw => f.includes(kw)) && !f.includes('限')
+    );
+    let bestRow = json.data[0];
+    if (mBalIdx >= 0 && json.data.length > 1) {
+      let maxVal = -1;
+      for (const row of json.data) {
+        const v = parseFloat(String(row[mBalIdx] || '0').replace(/,/g,''));
+        if (!isNaN(v) && v > maxVal) { maxVal = v; bestRow = row; }
+      }
+    }
+
+    const result = parseMarginRow(fields, bestRow);
+    // 包含診斷資訊：行數、欄位名、選中行的前6個值
+    result._rawFields = `rwd:rows=${json.data.length} mBalIdx=${mBalIdx} fields=${fields.slice(0,6).join('|')} vals=${bestRow.slice(0,7).join('|')}`;
     console.log('TWSE MI_MARGN result:', JSON.stringify(result));
     if (Object.keys(result).filter(k => !k.startsWith('_')).length >= 2) return result;
-    return { _error: 'no fields matched. fields=' + json.fields.slice(0,6).join(',') };
+    return { _error: 'no fields matched. ' + result._rawFields };
   } catch(e) {
     return { _error: 'rwd: ' + e.message };
   }
