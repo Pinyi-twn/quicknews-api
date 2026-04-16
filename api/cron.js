@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-E'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-F'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -244,7 +244,11 @@ async function fetchTWSEMargin() {
     const result = parseMarginRow(fields, row);
     result._rawFields = `${tag}:rows=${rawData.length} fields=${fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
     const dataKeys = Object.keys(result).filter(k => !k.startsWith('_'));
-    if (dataKeys.length < 2) return null;
+    if (dataKeys.length < 2) {
+      // 有資料但欄位名稱不符：記錄實際欄位名稱以便修正 parseMarginRow
+      errors.push(`${tag}: 欄位解析不足(${dataKeys.length}) fields=[${fields.slice(0,8).join('|')}] row0=[${row?.slice(0,8)?.join('|')}]`);
+      return null;
+    }
     // 融資餘額合理性檢查：市場合計應 > 500億；若過小代表抓到單一股票資料而非市場合計
     const mBal = result['融資餘額'];
     if (mBal) {
