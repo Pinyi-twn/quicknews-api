@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-C'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-D'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -235,8 +235,9 @@ async function fetchTWSEMargin() {
       const json = await doFetch(url);
       const r = tryParse(json, tag);
       if (r) return r;
-      // 記錄實際 stat 值以便診斷（TWSE 可能回傳中文錯誤訊息）
-      errors.push(`${tag}: stat="${json.stat}" fields=${!!json.fields} data=${json.data?.length ?? 0}`);
+      // 記錄完整 key 清單，方便診斷 TWSE 回傳格式差異
+      const topKeys = Object.keys(json).join(',');
+      errors.push(`${tag}: stat="${json.stat}" keys=[${topKeys}] fields=${!!json.fields} data=${json.data?.length ?? 0}`);
       return null;
     } catch(e) {
       errors.push(`${tag}: ${e.message}`);
@@ -248,13 +249,24 @@ async function fetchTWSEMargin() {
   const ra = await attempt(RWD, 'rwd_today');
   if (ra) return ra;
 
-  // 方法B：exchangeReport + selectType=MS + 西元日期（24h 可用的歷史數據）
-  //   - 從今天往前試，第一個有資料的工作日即採用
-  //   - 確保早盤（06:30 cron）或凌晨也能拿到前一個工作日的數據
-  for (const date of dates) {
-    const rb = await attempt(`${EXR}&selectType=MS&date=${date}`, `exr_${date}`);
+  // 方法B：rwd + 西元日期（測試 rwd 是否支援歷史查詢；若支援則 24h 可用）
+  //   rwd 端點格式正確（fields/data），只是當日無盤前/凌晨數據
+  //   若支援 date= 參數則可直接取前一工作日
+  for (const date of dates.slice(1, 4)) { // 從昨天往前試3天
+    const rb = await attempt(`${RWD}&date=${date}`, `rwd_${date}`);
     if (rb) return rb;
   }
+
+  // 方法C：exchangeReport + selectType=MS + 西元日期
+  //   selectType=MS 可能為「月統計」（月底才有），或格式不同於 rwd
+  //   保留作為診斷，日後確認正確 selectType 後調整
+  for (const date of dates.slice(1, 4)) {
+    const rc = await attempt(`${EXR}&selectType=MS&date=${date}`, `exr_MS_${date}`);
+    if (rc) return rc;
+  }
+
+  // 方法D：exchangeReport 不帶 selectType（檢查預設回傳格式）
+  await attempt(`${EXR}&date=${dates[1]}`, `exr_noST_${dates[1]}`);
 
   return { _error: errors.join(' | ') };
 }
