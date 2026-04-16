@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-D'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-E'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -204,11 +204,45 @@ async function fetchTWSEMargin() {
     } catch(e) { clearTimeout(t); throw e; }
   };
 
+  const RWD = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
+  const EXR = 'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json';
+  const errors = [];
+  const dates = recentDates(6); // 今天 + 最近 5 個工作日（跨假日/連假時備用）
+
   const tryParse = (json, tag) => {
-    if (!json.fields || !json.data?.length) return null;
-    const row = pickBestRow(json.fields, json.data);
-    const result = parseMarginRow(json.fields, row);
-    result._rawFields = `${tag}:rows=${json.data.length} fields=${json.fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
+    // TWSE API 有兩種回傳格式：
+    //   舊版：{ stat, fields:[], data:[[]] }（頂層直接有 fields/data）
+    //   新版：{ stat, date, tables:[{title, fields:[], data:[[]]}, ...] }
+    let fields = json.fields;
+    let rawData = json.data;
+
+    if ((!fields || !rawData?.length) && Array.isArray(json.tables)) {
+      // 新版格式：從 tables 陣列中找第一個有資料的表
+      for (const t of json.tables) {
+        if (Array.isArray(t.fields) && t.fields.length && Array.isArray(t.data) && t.data.length) {
+          fields = t.fields;
+          rawData = t.data;
+          break;
+        }
+      }
+    }
+
+    if (!fields || !rawData?.length) {
+      // 詳細記錄 tables 結構以便診斷
+      if (Array.isArray(json.tables)) {
+        const tabInfo = json.tables.length === 0
+          ? 'empty'
+          : json.tables.map((t,i) => `t${i}:[${t.fields?.length??0}f,${t.data?.length??0}r,title="${String(t.title||'').slice(0,20)}"]`).join(',');
+        errors.push(`${tag}: stat="${json.stat}" tables=[${tabInfo}]`);
+      } else {
+        errors.push(`${tag}: stat="${json.stat}" keys=[${Object.keys(json).join(',')}]`);
+      }
+      return null;
+    }
+
+    const row = pickBestRow(fields, rawData);
+    const result = parseMarginRow(fields, row);
+    result._rawFields = `${tag}:rows=${rawData.length} fields=${fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
     const dataKeys = Object.keys(result).filter(k => !k.startsWith('_'));
     if (dataKeys.length < 2) return null;
     // 融資餘額合理性檢查：市場合計應 > 500億；若過小代表抓到單一股票資料而非市場合計
@@ -223,21 +257,12 @@ async function fetchTWSEMargin() {
     return result;
   };
 
-  const RWD = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json';
-  // exchangeReport 使用西元日期（YYYYMMDD），非民國曆；selectType=MS 為市場統計（市場別合計）
-  const EXR = 'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json';
-  const errors = [];
-  const dates = recentDates(6); // 今天 + 最近 5 個工作日（跨假日/連假時備用）
-
-  // 每次 fetch 後統一記錄結果（無論 stat 為何）
+  // 每次 fetch 後統一記錄結果（tryParse 負責推入 errors）
   const attempt = async (url, tag) => {
     try {
       const json = await doFetch(url);
       const r = tryParse(json, tag);
       if (r) return r;
-      // 記錄完整 key 清單，方便診斷 TWSE 回傳格式差異
-      const topKeys = Object.keys(json).join(',');
-      errors.push(`${tag}: stat="${json.stat}" keys=[${topKeys}] fields=${!!json.fields} data=${json.data?.length ?? 0}`);
       return null;
     } catch(e) {
       errors.push(`${tag}: ${e.message}`);
@@ -245,28 +270,21 @@ async function fetchTWSEMargin() {
     }
   };
 
-  // 方法A：rwd 不帶日期（當日數據，收盤後 13:30~24:00 台灣時間才有）
+  // 方法A：rwd 不帶日期（當日數據，收盤後 13:30~24:00 台灣時間）
   const ra = await attempt(RWD, 'rwd_today');
   if (ra) return ra;
 
-  // 方法B：rwd + 西元日期（測試 rwd 是否支援歷史查詢；若支援則 24h 可用）
-  //   rwd 端點格式正確（fields/data），只是當日無盤前/凌晨數據
-  //   若支援 date= 參數則可直接取前一工作日
-  for (const date of dates.slice(1, 4)) { // 從昨天往前試3天
+  // 方法B：rwd + 西元日期（rwd 亦支援歷史查詢，24h 可取前一工作日）
+  for (const date of dates.slice(1, 4)) {
     const rb = await attempt(`${RWD}&date=${date}`, `rwd_${date}`);
     if (rb) return rb;
   }
 
-  // 方法C：exchangeReport + selectType=MS + 西元日期
-  //   selectType=MS 可能為「月統計」（月底才有），或格式不同於 rwd
-  //   保留作為診斷，日後確認正確 selectType 後調整
+  // 方法C：exchangeReport + selectType=MS + 西元日期（市場別統計）
   for (const date of dates.slice(1, 4)) {
     const rc = await attempt(`${EXR}&selectType=MS&date=${date}`, `exr_MS_${date}`);
     if (rc) return rc;
   }
-
-  // 方法D：exchangeReport 不帶 selectType（檢查預設回傳格式）
-  await attempt(`${EXR}&date=${dates[1]}`, `exr_noST_${dates[1]}`);
 
   return { _error: errors.join(' | ') };
 }
