@@ -6,7 +6,7 @@
 //   NOTION_AI_DB_ID      → 速懶報 AI 分析
 //   NOTION_MONITOR_DB_ID → 速懶報 數據監控
 
-const CRON_VERSION = 'v20260416-F'; // 版本標記，用於確認 Vercel 部署版本
+const CRON_VERSION = 'v20260416-G'; // 版本標記，用於確認 Vercel 部署版本
 
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
@@ -175,6 +175,62 @@ async function fetchTWSEMargin() {
     return result;
   }
 
+  // 新版 TWSE tables[] 格式：行導向（項目 | 買進 | 賣出 | 現金(券)償還 | 前日餘額 | 今日餘額）
+  // 每列代表一個指標（融資(金額)、融券(交易單位) 等），需按「項目」名稱找到對應列
+  function parseMarginTable(fields, data) {
+    const result = {};
+    const iIdx = fields.findIndex(f => f === '項目');
+    const todIdx = fields.findIndex(f => String(f).includes('今日餘額'));
+    const preIdx = fields.findIndex(f => String(f).includes('前日餘額'));
+    if (iIdx < 0 || todIdx < 0) return result;
+
+    const getNum = (row, idx) => {
+      if (idx < 0 || !row || row[idx] == null || row[idx] === '') return null;
+      const n = parseFloat(String(row[idx]).replace(/,/g,''));
+      return isNaN(n) ? null : n;
+    };
+
+    // 融資(金額)列 → 融資餘額 + 融資餘額變動（千元 ÷ 100000 = 億）
+    const mRow = data.find(r => /融資.*金額/.test(String(r[iIdx]||'')));
+    if (mRow) {
+      const today = getNum(mRow, todIdx);
+      if (today != null && today > 0) {
+        result['融資餘額'] = (today / 100000).toFixed(0) + '億';
+        const prev = getNum(mRow, preIdx);
+        if (prev != null && prev > 0) {
+          const chg = today - prev;
+          result['融資餘額變動'] = (chg >= 0 ? '+' : '') + (chg / 100000).toFixed(0) + '億';
+        }
+      }
+    }
+
+    // 融券(交易單位)列 → 融券餘額（張）
+    const sRow = data.find(r => /融券.*交易單位/.test(String(r[iIdx]||'')));
+    if (sRow) {
+      const lots = getNum(sRow, todIdx);
+      if (lots != null && lots > 0) {
+        result['融券餘額'] = lots >= 10000
+          ? (lots/10000).toFixed(1) + '萬張'
+          : lots >= 1000 ? (lots/1000).toFixed(1) + '千張'
+          : lots.toFixed(0) + '張';
+      }
+    }
+
+    // 融資/融券使用率（若有此列）
+    const mRateRow = data.find(r => /融資.*使用率/.test(String(r[iIdx]||'')));
+    if (mRateRow) {
+      const rate = String(mRateRow[todIdx] ?? '').replace(/[,%]/g,'').trim();
+      if (rate && !isNaN(parseFloat(rate))) result['融資使用率'] = rate;
+    }
+    const sRateRow = data.find(r => /融券.*使用率/.test(String(r[iIdx]||'')));
+    if (sRateRow) {
+      const rate = String(sRateRow[todIdx] ?? '').replace(/[,%]/g,'').trim();
+      if (rate && !isNaN(parseFloat(rate))) result['融券使用率'] = rate;
+    }
+
+    return result;
+  }
+
   function pickBestRow(fields, data) {
     const mBalIdx = fields.findIndex(f =>
       ['融資','餘額'].every(kw => f.includes(kw)) && !f.includes('限')
@@ -240,13 +296,19 @@ async function fetchTWSEMargin() {
       return null;
     }
 
-    const row = pickBestRow(fields, rawData);
-    const result = parseMarginRow(fields, row);
-    result._rawFields = `${tag}:rows=${rawData.length} fields=${fields.slice(0,5).join('|')} vals=${row.slice(0,6).join('|')}`;
+    // 依格式選擇解析器：行導向（有「項目」欄）或列導向（欄位直接命名）
+    const isRowOriented = fields.some(f => f === '項目');
+    let result;
+    if (isRowOriented) {
+      result = parseMarginTable(fields, rawData);
+    } else {
+      const row = pickBestRow(fields, rawData);
+      result = parseMarginRow(fields, row);
+    }
+    result._rawFields = `${tag}:rows=${rawData.length} fmt=${isRowOriented?'row':'col'} fields=${fields.slice(0,5).join('|')}`;
     const dataKeys = Object.keys(result).filter(k => !k.startsWith('_'));
     if (dataKeys.length < 2) {
-      // 有資料但欄位名稱不符：記錄實際欄位名稱以便修正 parseMarginRow
-      errors.push(`${tag}: 欄位解析不足(${dataKeys.length}) fields=[${fields.slice(0,8).join('|')}] row0=[${row?.slice(0,8)?.join('|')}]`);
+      errors.push(`${tag}: 解析不足(${dataKeys.length}) fields=[${fields.slice(0,8).join('|')}] data0=[${rawData[0]?.slice(0,8)?.join('|')}]`);
       return null;
     }
     // 融資餘額合理性檢查：市場合計應 > 500億；若過小代表抓到單一股票資料而非市場合計
