@@ -27,7 +27,7 @@ function formatTW(date) {
 // PART 1: Yahoo Finance 數據抓取
 // ══════════════════════════════════════════════════════════
 
-const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','0050.TW','NVDA','AAPL','TSLA','META','MSFT','GOOGL','AMZN','JPM','XOM','SPY','QQQ','XLK','XLF','XLE','GC=F','CL=F'];
+const SYMBOLS = ['^VIX','^TWII','^IXIC','^GSPC','USDTWD=X','2330.TW','2454.TW','2317.TW','2382.TW','2303.TW','2881.TW','0050.TW','NVDA','AAPL','TSLA','META','MSFT','GOOGL','AMZN','JPM','XOM','SPY','QQQ','XLK','XLF','XLE','GC=F','CL=F'];
 
 async function fetchYahooFinance() {
   const results = {};
@@ -362,11 +362,16 @@ function computeMonitorData(yf) {
   const sp   = yf['^GSPC'] || { price:0, ch:0 };
   const ixic = yf['^IXIC'] || { price:0, ch:0 };
   const usd  = yf['USDTWD=X']?.price || 32;
-  const nvda = yf['NVDA'] || { price:0, ch:0 };
-  const aapl = yf['AAPL'] || { price:0, ch:0 };
-  const tsla = yf['TSLA'] || { price:0, ch:0 };
-  const meta = yf['META'] || { price:0, ch:0 };
-  const tsmc = yf['2330.TW'] || { price:0, ch:0 };
+  const nvda = yf['NVDA']     || { price:0, ch:0 };
+  const aapl = yf['AAPL']     || { price:0, ch:0 };
+  const tsla = yf['TSLA']     || { price:0, ch:0 };
+  const meta = yf['META']     || { price:0, ch:0 };
+  const tsmc = yf['2330.TW']  || { price:0, ch:0 };
+  const mlk  = yf['2454.TW']  || { price:0, ch:0 };
+  const hon  = yf['2317.TW']  || { price:0, ch:0 };
+  const qua  = yf['2382.TW']  || { price:0, ch:0 };
+  const umc  = yf['2303.TW']  || { price:0, ch:0 };
+  const fub  = yf['2881.TW']  || { price:0, ch:0 };
 
   // 恐懼貪婪指數
   const twFG = Math.max(5, Math.min(95, Math.round(100 - ((vix - 10) / 25) * 80)));
@@ -391,9 +396,14 @@ function computeMonitorData(yf) {
     { title:'S&P500 GSPC',  value: fmt(sp.price, sp.ch) },
     { title:'USD/TWD 匯率', value: usd.toFixed(2) },
     { title:'台積電 2330.TW', value: fmt(tsmc.price, tsmc.ch) },
-    { title:'NVDA 輝達',    value: fmt(nvda.price, nvda.ch) },
-    { title:'AAPL 蘋果',    value: fmt(aapl.price, aapl.ch) },
-    { title:'TSLA 特斯拉',  value: fmt(tsla.price, tsla.ch) },
+    { title:'聯發科 2454.TW', value: fmt(mlk.price,  mlk.ch) },
+    { title:'鴻海 2317.TW',   value: fmt(hon.price,  hon.ch) },
+    { title:'廣達 2382.TW',   value: fmt(qua.price,  qua.ch) },
+    { title:'聯電 2303.TW',   value: fmt(umc.price,  umc.ch) },
+    { title:'富邦金 2881.TW', value: fmt(fub.price,  fub.ch) },
+    { title:'NVDA 輝達',      value: fmt(nvda.price, nvda.ch) },
+    { title:'AAPL 蘋果',      value: fmt(aapl.price, aapl.ch) },
+    { title:'TSLA 特斯拉',    value: fmt(tsla.price, tsla.ch) },
     // 多空比（從 TWII/GSPC 漲跌幅推算，數字格式）
     { title:'台股多頭%', value: String(twLong) },
     { title:'美股多頭%', value: String(usLong) },
