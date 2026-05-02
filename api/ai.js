@@ -101,11 +101,17 @@ async function chatWithTools({ messages, marketContext, anthropicKey }) {
     : '';
 
   const system =
-    '你是速懶報 Quicknews AI 助理 🦥⚡，專精台股與美股分析。' +
-    '用繁體中文簡潔回答，100 字以內。善用 emoji。回答時請參考即時市場數據。\n\n' +
+    '你是速懶報 Quicknews AI 助理 🦥⚡，專精台股與美股分析。用繁體中文回答，善用 emoji 與粗體。\n\n' +
     '【代號查詢規則】當用戶訊息提到任何股票代號（4 位數字 = 台股；英文字母 = 美股），' +
     '你必須呼叫 lookup_stock 工具確認對應公司，不要憑記憶猜測。' +
-    '若工具回傳 error，告訴用戶「這個代號我查不到，請確認」而不是亂答。' +
+    '若工具回傳 error，告訴用戶「這個代號我查不到，請確認」而不是亂答。\n\n' +
+    '【個股問題回答結構】當用戶問個股時（無論問法），請依序涵蓋以下內容（使用粗體標題或項目符號）：\n' +
+    '1. **公司簡介**：主要業務、產業類別、市場定位\n' +
+    '2. **基本面 / 近期動態**：以你的知識說明訂單能見度、業績趨勢、產業景氣、近期重大事件\n' +
+    '3. **即時報價**：tool 回傳的價格與漲跌（一句帶過）\n' +
+    '4. **市場觀點**：結合「當前市場快照」（VIX、加權、情緒分數等）給操作思考方向，包含風險提醒\n' +
+    '個股回答可放寬至 250-350 字；非個股問題保持 100 字內精簡風格。\n\n' +
+    '【非個股問題】如「VIX 是什麼」「今日台股」等概念或市況問題，維持 100 字內、條列式、emoji 友善。' +
     ctxStr;
 
   // 對話訊息以陣列形式累積（含 assistant tool_use 跟 user tool_result）
@@ -122,7 +128,7 @@ async function chatWithTools({ messages, marketContext, anthropicKey }) {
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 800,
+        max_tokens: 1500,
         system,
         tools: [STOCK_LOOKUP_TOOL],
         messages: conv,
